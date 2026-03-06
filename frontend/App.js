@@ -64,7 +64,7 @@ const INTERNAL_SCRAPER = {
 
         if (foundPosts.length === 0) return { posts: [], page, offset: 0 };
 
-        const BATCH_SIZE = 3; // 한 번에 3개까지만 요청
+        const BATCH_SIZE = 15; // 최대 15개까지 선로딩 허용
         const limitedPosts = foundPosts.slice(offset, offset + BATCH_SIZE);
         let nextOffset = offset + BATCH_SIZE;
         let nextPage = page;
@@ -75,10 +75,20 @@ const INTERNAL_SCRAPER = {
         }
 
         const enriched = [];
-        for (const p of limitedPosts) {
-            const detail = await this.getDetail(gallery, p.path, p.id);
-            enriched.push({ ...p, detail });
-            await sleep(300); // 각 요청 사이 최소 200ms 이상의 딜레이 (300ms 설정)
+        // 3개씩 묶어서 200ms 간격으로 로딩
+        for (let i = 0; i < limitedPosts.length; i += 3) {
+            const currentBatch = limitedPosts.slice(i, i + 3);
+            const batchResults = await Promise.all(
+                currentBatch.map(p => this.getDetail(gallery, p.path, p.id))
+            );
+            
+            batchResults.forEach((detail, idx) => {
+                enriched.push({ ...currentBatch[idx], detail });
+            });
+
+            if (i + 3 < limitedPosts.length) {
+                await sleep(200); // 200ms 대기
+            }
         }
 
         return { posts: enriched, page: nextPage, offset: nextOffset };
@@ -134,9 +144,10 @@ const INTERNAL_SCRAPER = {
     }
 };
 
-const PostItem = ({ item, onOpenDetail, onOpenWebView, onImagePress, itemHeight }) => {
+const PostItem = React.memo(({ item, onOpenDetail, onOpenWebView, onImagePress, itemHeight }) => {
   const detail = item.detail;
   const displayImages = detail?.images || [];
+  const displayDccons = detail?.dccons || [];
   const previewText = detail?.plainText || "";
 
   return (
@@ -149,9 +160,17 @@ const PostItem = ({ item, onOpenDetail, onOpenWebView, onImagePress, itemHeight 
             pagingEnabled
             showsHorizontalScrollIndicator={false}
             keyExtractor={(_, i) => i.toString()}
+            initialNumToRender={1}
+            maxToRenderPerBatch={1}
+            windowSize={3}
+            removeClippedSubviews={true}
             renderItem={({ item: img, index }) => (
               <TouchableOpacity activeOpacity={0.9} onPress={() => onImagePress(displayImages, index)}>
-                <Image source={{ uri: img, headers: { 'Referer': 'https://gall.dcinside.com/', 'User-Agent': USER_AGENTS[0] } }} style={{ width, height: itemHeight * 0.55 }} resizeMode="contain" />
+                <Image 
+                  source={{ uri: img, headers: { 'Referer': 'https://gall.dcinside.com/', 'User-Agent': USER_AGENTS[0] } }} 
+                  style={{ width, height: itemHeight * 0.55 }} 
+                  resizeMode="contain" 
+                />
               </TouchableOpacity>
             )}
           />
@@ -166,7 +185,22 @@ const PostItem = ({ item, onOpenDetail, onOpenWebView, onImagePress, itemHeight 
                 <View style={styles.avatar}><User color="white" size={18} /></View>
                 <Text style={styles.titleText} numberOfLines={1}>{item.title}</Text>
             </View>
-            <Text style={styles.bodyPreviewText} numberOfLines={3}>{previewText}</Text>
+            <Text style={styles.bodyPreviewText} numberOfLines={2}>{previewText}</Text>
+            
+            {displayDccons.length > 0 && (
+                <View style={styles.previewDcconRow}>
+                    {displayDccons.slice(0, 5).map((url, i) => (
+                        <Image 
+                            key={i} 
+                            source={{ uri: url, headers: { 'Referer': 'https://gall.dcinside.com/', 'User-Agent': USER_AGENTS[0] } }} 
+                            style={styles.previewDccon} 
+                            resizeMode="contain" 
+                        />
+                    ))}
+                    {displayDccons.length > 5 && <Text style={styles.moreDcconText}>+{displayDccons.length - 5}</Text>}
+                </View>
+            )}
+            
             <Text style={styles.seeMoreBtn}>...내용 전체 보기 (클릭)</Text>
         </TouchableOpacity>
       </View>
@@ -178,7 +212,7 @@ const PostItem = ({ item, onOpenDetail, onOpenWebView, onImagePress, itemHeight 
       </View>
     </View>
   );
-};
+}, (prev, next) => prev.item.id === next.item.id && prev.itemHeight === next.itemHeight);
 
 export default function App() {
   const [galleries, setGalleries] = useState([{ id: 'manosaba', name: '마녀재판' }]);
@@ -198,7 +232,15 @@ export default function App() {
   const [currentImages, setCurrentImages] = useState([]);
   const [initialImageIndex, setInitialImageIndex] = useState(0);
 
+  // 갤러리별 데이터 캐시 및 관리 상태
+  const [galleriesState, setGalleriesState] = useState({});
+  const [editGallery, setEditGallery] = useState(null);
+  const [newNameInput, setNewNameInput] = useState('');
+
+  const allFetchedIdsRef = useRef(new Set());
   const stateRef = useRef({ posts, loading, currentGallery, page, offset, currentIndex });
+  const listRef = useRef(null);
+
   useEffect(() => {
     stateRef.current = { posts, loading, currentGallery, page, offset, currentIndex };
   }, [posts, loading, currentGallery, page, offset, currentIndex]);
@@ -215,9 +257,9 @@ export default function App() {
       if (saved) {
         const list = JSON.parse(saved);
         setGalleries(list);
-        if (list.length > 0) setCurrentGallery(list[0]);
+        if (list.length > 0) switchGallery(list[0], true);
       } else {
-        setCurrentGallery(galleries[0]);
+        switchGallery(galleries[0], true);
       }
     } catch (e) { console.error(e); }
   };
@@ -226,15 +268,40 @@ export default function App() {
     loadGalleries();
   }, []);
 
-  useEffect(() => {
-    if (currentGallery) {
-      setPosts([]);
-      setPage(1);
-      setOffset(0);
-      setCurrentIndex(0); // 갤러리 변경 시 현재 인덱스 초기화
-      fetchPosts(currentGallery.id, 1, 0, true);
+  const switchGallery = (targetGallery, isInitial = false) => {
+    const prevGal = stateRef.current.currentGallery;
+    
+    // 현재 상태 저장
+    if (prevGal && !isInitial) {
+      setGalleriesState(prev => ({
+        ...prev,
+        [prevGal.id]: {
+          posts: stateRef.current.posts,
+          page: stateRef.current.page,
+          offset: stateRef.current.offset,
+          currentIndex: stateRef.current.currentIndex
+        }
+      }));
     }
-  }, [currentGallery]);
+
+    // 대상 상태 복원
+    const s = galleriesState[targetGallery.id] || { posts: [], page: 1, offset: 0, currentIndex: 0 };
+    setPosts(s.posts);
+    setPage(s.page);
+    setOffset(s.offset);
+    setCurrentIndex(s.currentIndex);
+    setCurrentGallery(targetGallery);
+
+    if (s.posts.length === 0) {
+      fetchPosts(targetGallery.id, 1, 0, true);
+    } else {
+        setTimeout(() => {
+            if (listRef.current && s.currentIndex > 0) {
+                listRef.current.scrollToIndex({ index: s.currentIndex, animated: false });
+            }
+        }, 100);
+    }
+  };
 
   const fetchPosts = async (galId, pageNum, currentOffset, refresh = false) => {
     if (loading || !galId) return;
@@ -243,23 +310,19 @@ export default function App() {
       const data = await INTERNAL_SCRAPER.fetchList(galId, pageNum, currentOffset);
       if (data && data.posts) {
         setPosts(prev => {
-          const combined = refresh ? data.posts : [...prev, ...data.posts];
-          
-          // 중복 제거
-          const uniquePosts = [];
-          const seenIds = new Set();
-          combined.forEach(p => {
-            if (!seenIds.has(p.id)) {
-              seenIds.add(p.id);
-              uniquePosts.push(p);
+          const newPosts = data.posts.filter(p => !allFetchedIdsRef.current.has(p.id));
+          newPosts.forEach(p => allFetchedIdsRef.current.add(p.id));
+
+          const combined = refresh ? newPosts : [...prev, ...newPosts];
+          const curIdx = stateRef.current.currentIndex;
+          return combined.map((p, idx) => {
+            if (idx < curIdx - 10) {
+              if (p.detail && (p.detail.fullHtml || p.detail.images.length > 0)) {
+                return { ...p, detail: { ...p.detail, fullHtml: null, images: [], plainText: "(메모리 절약 중)" } };
+              }
             }
+            return p;
           });
-
-          if (refresh) return uniquePosts; // 새로고침(또는 첫 진입) 시에는 슬라이싱 하지 않음
-
-          // 슬라이싱 로직: 현재 보고 있는 글 이전의 글은 10개만 보존
-          const startIdx = Math.max(0, stateRef.current.currentIndex - 10);
-          return uniquePosts.slice(startIdx);
         });
         setPage(data.page);
         setOffset(data.offset);
@@ -276,6 +339,39 @@ export default function App() {
     setShowImageModal(true);
   };
 
+  const handleGalleryLongPress = (g) => {
+    Alert.alert(
+      `${g.name} 관리`,
+      "작업을 선택하세요",
+      [
+        { text: "이름 변경", onPress: () => { setEditGallery(g); setNewNameInput(g.name); } },
+        { text: "삭제", style: "destructive", onPress: () => deleteGallery(g.id) },
+        { text: "취소", style: "cancel" }
+      ]
+    );
+  };
+
+  const renameGallery = () => {
+    if (!newNameInput.trim()) return;
+    const newList = galleries.map(g => g.id === editGallery.id ? { ...g, name: newNameInput.trim() } : g);
+    setGalleries(newList);
+    saveGalleries(newList);
+    if (currentGallery?.id === editGallery.id) {
+        setCurrentGallery({ ...currentGallery, name: newNameInput.trim() });
+    }
+    setEditGallery(null);
+  };
+
+  const deleteGallery = (id) => {
+    const newGalleries = galleries.filter(g => g.id !== id);
+    setGalleries(newGalleries);
+    saveGalleries(newGalleries);
+    if (currentGallery?.id === id) {
+      if (newGalleries.length > 0) switchGallery(newGalleries[0]);
+      else { setPosts([]); setCurrentGallery(null); }
+    }
+  };
+
   const addGallery = () => {
     if (!urlInput) return;
     let id = "";
@@ -286,27 +382,14 @@ export default function App() {
     }
     
     if (id) {
-      const newGalleries = [...galleries, { id, name: id }];
+      const newG = { id, name: id };
+      const newGalleries = [...galleries, newG];
       setGalleries(newGalleries);
       saveGalleries(newGalleries);
       setUrlInput("");
       setShowInput(false);
-      Alert.alert("알림", `${id} 갤러리가 추가되었습니다.`);
+      switchGallery(newG);
     }
-  };
-
-  const deleteGallery = (id) => {
-    Alert.alert("삭제", "이 갤러리를 삭제하시겠습니까?", [
-      { text: "취소", style: "cancel" },
-      { text: "삭제", style: "destructive", onPress: () => {
-        const newGalleries = galleries.filter(g => g.id !== id);
-        setGalleries(newGalleries);
-        saveGalleries(newGalleries);
-        if (currentGallery?.id === id) {
-          setCurrentGallery(newGalleries.length > 0 ? newGalleries[0] : null);
-        }
-      }}
-    ]);
   };
 
   const onViewableItemsChanged = useRef(({ viewableItems }) => {
@@ -315,8 +398,8 @@ export default function App() {
       setCurrentIndex(newIndex);
       
       const { posts, loading, currentGallery, page, offset } = stateRef.current;
-      // 현재 글 제외하고 3개 이하로 남았을 때 추가 로드 (총 3개 프리로드 유지)
-      if (newIndex + 3 >= posts.length && !loading && currentGallery) {
+      // 현재 글 제외하고 15개 이하로 남았을 때 추가 로드 (최대 15개 선로딩 유지)
+      if (newIndex + 15 >= posts.length && !loading && currentGallery) {
         fetchPosts(currentGallery.id, page, offset);
       }
     }
@@ -353,7 +436,12 @@ export default function App() {
       <View style={styles.headerContainer}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.headerScroll}>
           {galleries.map((g) => (
-            <TouchableOpacity key={g.id} onPress={() => { setPosts([]); setCurrentGallery(g); setPage(1); setOffset(0); }} onLongPress={() => deleteGallery(g.id)} style={[styles.tab, currentGallery?.id === g.id && styles.activeTab]}>
+            <TouchableOpacity 
+              key={g.id} 
+              onPress={() => switchGallery(g)} 
+              onLongPress={() => handleGalleryLongPress(g)} 
+              style={[styles.tab, currentGallery?.id === g.id && styles.activeTab]}
+            >
               <Text style={[styles.tabText, currentGallery?.id === g.id && styles.activeTabText]}>{g.name}</Text>
             </TouchableOpacity>
           ))}
@@ -375,6 +463,7 @@ export default function App() {
             </View>
         ) : currentGallery && (
             <FlatList 
+                ref={listRef}
                 data={posts} 
                 renderItem={({ item }) => (
                 <PostItem 
@@ -385,13 +474,17 @@ export default function App() {
                     itemHeight={listLayoutHeight}
                 />
                 )} 
-                keyExtractor={(item, index) => item.id.toString() + index} 
+                keyExtractor={(item) => item.id.toString()} 
                 pagingEnabled 
                 showsVerticalScrollIndicator={false} 
                 onViewableItemsChanged={onViewableItemsChanged}
                 viewabilityConfig={{ itemVisiblePercentThreshold: 50 }}
                 getItemLayout={(data, index) => ({ length: listLayoutHeight, offset: listLayoutHeight * index, index })}
                 removeClippedSubviews={true}
+                initialNumToRender={2}
+                maxToRenderPerBatch={2}
+                windowSize={5}
+                updateCellsBatchingPeriod={100}
                 ListFooterComponent={loading && posts.length > 0 ? (
                     <View style={styles.footerLoading}>
                         <ActivityIndicator size="small" color="#fff" />
@@ -400,6 +493,24 @@ export default function App() {
             />
         )}
       </View>
+
+      <Modal visible={!!editGallery} transparent={true} animationType="fade">
+        <View style={styles.modalOverlay}>
+            <View style={styles.editModal}>
+                <Text style={styles.editTitle}>갤러리 이름 변경</Text>
+                <TextInput 
+                    style={styles.editInput} 
+                    value={newNameInput} 
+                    onChangeText={setNewNameInput} 
+                    autoFocus={true}
+                />
+                <View style={styles.editButtons}>
+                    <TouchableOpacity onPress={() => setEditGallery(null)} style={styles.editBtnCancel}><Text style={styles.editBtnText}>취소</Text></TouchableOpacity>
+                    <TouchableOpacity onPress={renameGallery} style={styles.editBtnSave}><Text style={styles.editBtnText}>저장</Text></TouchableOpacity>
+                </View>
+            </View>
+        </View>
+      </Modal>
 
       <Modal visible={showDetailModal} animationType="slide" onRequestClose={() => setShowDetailModal(false)}>
         <SafeAreaView style={styles.modalContent}>
@@ -493,6 +604,9 @@ const styles = StyleSheet.create({
   avatar: { width: 24, height: 24, borderRadius: 12, backgroundColor: '#333', justifyContent: 'center', alignItems: 'center', marginRight: 10 },
   titleText: { color: '#fff', fontSize: 17, fontWeight: 'bold', flex: 1 },
   bodyPreviewText: { color: '#aaa', fontSize: 14, marginTop: 8, lineHeight: 20 },
+  previewDcconRow: { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
+  previewDccon: { width: 50, height: 50, marginRight: 8 },
+  moreDcconText: { color: '#666', fontSize: 14, fontWeight: 'bold' },
   textScrollArea: { flex: 1, marginTop: 5 },
   bodyText: { color: '#bbb', fontSize: 15, lineHeight: 22 },
   seeMoreBtn: { color: '#555', marginTop: 10, fontSize: 12, fontWeight: 'bold' },
@@ -515,5 +629,13 @@ const styles = StyleSheet.create({
   fullImageContainer: { flex: 1, backgroundColor: 'rgba(0,0,0,1)', justifyContent: 'center' },
   fullImageWrapper: { width, height: '100%', justifyContent: 'center', alignItems: 'center' },
   fullImage: { width: width, height: '100%' },
-  imageCloseBtn: { position: 'absolute', top: 50, right: 20, zIndex: 10, padding: 10, backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 25 }
+  imageCloseBtn: { position: 'absolute', top: 50, right: 20, zIndex: 10, padding: 10, backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 25 },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center' },
+  editModal: { width: 300, backgroundColor: '#222', padding: 20, borderRadius: 15 },
+  editTitle: { color: '#fff', fontSize: 18, fontWeight: 'bold', marginBottom: 15, textAlign: 'center' },
+  editInput: { backgroundColor: '#333', color: '#fff', padding: 10, borderRadius: 8, marginBottom: 20 },
+  editButtons: { flexDirection: 'row', justifyContent: 'space-between' },
+  editBtnCancel: { flex: 1, padding: 12, marginRight: 5, backgroundColor: '#444', borderRadius: 8, alignItems: 'center' },
+  editBtnSave: { flex: 1, padding: 12, marginLeft: 5, backgroundColor: '#fff', borderRadius: 8, alignItems: 'center' },
+  editBtnText: { fontWeight: 'bold' }
 });
