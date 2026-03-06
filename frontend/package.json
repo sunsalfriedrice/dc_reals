@@ -1,0 +1,28 @@
+{
+  "name": "frontend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "axios": "^1.7.9",
+    "buffer": "^6.0.3",
+    "cheerio": "^1.0.0-rc.12",
+    "expo": "~54.0.33",
+    "lucide-react-native": "^0.468.0",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-cheerio": "^1.0.0-rc.4",
+    "react-native-svg": "15.12.1",
+    "react-native-webview": "13.15.0"
+  }
+}
