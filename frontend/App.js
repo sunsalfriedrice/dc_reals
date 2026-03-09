@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   StyleSheet, Text, View, Dimensions, FlatList, Image, ScrollView, 
   ActivityIndicator, SafeAreaView, StatusBar, TouchableOpacity, TextInput, Alert, Modal
@@ -7,46 +7,70 @@ import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WebView } from 'react-native-webview';
 import { MessageCircle, Share2, User, Plus, X, ChevronLeft, Globe } from 'lucide-react-native';
+// @ts-ignore
 import cheerio from 'react-native-cheerio';
 
 const { width, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-// 갤러리 타입 정의 (마이너, 일반, 미니)
 const GALL_TYPES = ['mgallery/board', 'board', 'mini/board'];
 const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0'
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+    'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
 ];
 
 const getRandUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+// Increased delays: 1000-2500ms between requests for better rate limiting
+const getJitter = () => Math.floor(Math.random() * (2500 - 1000 + 1) + 1000);
+// Shorter delay between path attempts: 300-800ms
+const getPathJitter = () => Math.floor(Math.random() * (800 - 300 + 1) + 300);
 
 const getHeaders = (referer = 'https://www.dcinside.com/') => ({
     'User-Agent': getRandUA(),
     'Referer': referer,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'same-origin',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0'
 });
 
-// 단독 실행 가능한 내장 스크레이퍼
 const INTERNAL_SCRAPER = {
     async fetchList(gallery, page = 1, offset = 0) {
         let foundPosts = [];
         let selectedPath = 'board';
 
-        for (const path of GALL_TYPES) {
+        // Max 4 posts total limit check
+        if (offset >= 4) return { posts: [], page, offset };
+
+        // Add initial delay before first request to avoid rapid-fire on gallery switch
+        if (offset === 0) {
+            await sleep(getPathJitter());
+        }
+
+        for (let pathIdx = 0; pathIdx < GALL_TYPES.length; pathIdx++) {
+            const path = GALL_TYPES[pathIdx];
             const url = `https://gall.dcinside.com/${path}/lists/?id=${gallery}&page=${page}&exception_mode=recommend`;
             try {
-                const res = await axios.get(url, { headers: getHeaders(), timeout: 8000 });
+                const res = await axios.get(url, { headers: getHeaders(), timeout: 10000 });
                 const $ = cheerio.load(res.data);
                 const posts = [];
-                
-                $('tr.ub-content').each((i, el) => {
+
+                $('tr.ub-content').each((_i, el) => {
                     const $row = $(el);
+                    // Skip Notice (공지)
                     if ($row.hasClass('ub-notice')) return;
                     const numText = $row.find('td.gall_num').text().trim();
                     if (numText === '공지' || isNaN(parseInt(numText))) return;
-                    
+
                     if ($row.find('.icon_notice').length > 0 || $row.find('.notice_icon').length > 0) return;
 
                     const titleLink = $row.find('td.gall_tit a').first();
@@ -59,55 +83,70 @@ const INTERNAL_SCRAPER = {
                     selectedPath = path;
                     break;
                 }
-            } catch (e) { continue; }
+
+                // Add delay between path attempts
+                if (pathIdx < GALL_TYPES.length - 1) {
+                    await sleep(getPathJitter());
+                }
+            } catch (e) {
+                // Add delay before trying next path on error
+                if (pathIdx < GALL_TYPES.length - 1) {
+                    await sleep(getPathJitter());
+                }
+            }
         }
 
         if (foundPosts.length === 0) return { posts: [], page, offset: 0 };
 
-        const BATCH_SIZE = 15; // 최대 15개까지 선로딩 허용
-        const limitedPosts = foundPosts.slice(offset, offset + BATCH_SIZE);
-        let nextOffset = offset + BATCH_SIZE;
+        // Reduced batch size from 3 to 2 for more conservative loading
+        const BATCH_SIZE = 2;
+        const remainingToMax = 4 - offset;
+        const currentBatchSize = Math.min(BATCH_SIZE, remainingToMax);
+
+        const limitedPosts = foundPosts.slice(offset, offset + currentBatchSize);
+        let nextOffset = offset + currentBatchSize;
         let nextPage = page;
 
-        if (nextOffset >= foundPosts.length) {
-            nextOffset = 0;
-            nextPage += 1;
+        if (nextOffset >= Math.min(foundPosts.length, 4)) {
+            // If we reached 4 or the end of the first page, we stop or signal end
+            // Note: Keeping logic simple to strictly adhere to 'Max 4'
+            nextOffset = Math.min(nextOffset, 4);
         }
 
         const enriched = [];
-        // 3개씩 묶어서 200ms 간격으로 로딩
-        for (let i = 0; i < limitedPosts.length; i += 3) {
-            const currentBatch = limitedPosts.slice(i, i + 3);
-            const batchResults = await Promise.all(
-                currentBatch.map(p => this.getDetail(gallery, p.path, p.id))
-            );
-            
-            batchResults.forEach((detail, idx) => {
-                enriched.push({ ...currentBatch[idx], detail });
-            });
+        for (let i = 0; i < limitedPosts.length; i++) {
+            const p = limitedPosts[i];
+            const detail = await this.getDetail(gallery, p.path || selectedPath, p.id);
+            enriched.push({ ...p, detail });
 
-            if (i + 3 < limitedPosts.length) {
-                await sleep(200); // 200ms 대기
+            // Increased jittered delay: 1s to 2.5s between detail requests
+            if (i < limitedPosts.length - 1) {
+                await sleep(getJitter());
             }
         }
 
         return { posts: enriched, page: nextPage, offset: nextOffset };
     },
-// ... (getDetail remains same)
 
     async getDetail(gallery, path, id, retry = 0) {
         const url = `https://gall.dcinside.com/${path}/view/?id=${gallery}&no=${id}`;
+        const referer = `https://gall.dcinside.com/${path}/lists/?id=${gallery}`;
         try {
-            const res = await axios.get(url, { headers: getHeaders(`https://gall.dcinside.com/${path}/lists/?id=${gallery}`), timeout: 15000 });
+            const res = await axios.get(url, { headers: getHeaders(referer), timeout: 15000 });
             const $ = cheerio.load(res.data);
             const contentDiv = $('div.write_div');
-            if (!contentDiv.length) throw new Error("Empty content");
 
-            // 불필요한 요소 미리 제거 (속도 향상)
+            if (!contentDiv.length) {
+                return { id, plainText: "내용이 없습니다.", images: [], dccons: [], originUrl: url, fullHtml: "" };
+            }
+
             contentDiv.find('script, style, iframe, adsense, .revenue_unit_wrap, .comment_wrap').remove();
 
-            // 로딩 이미지(Lazy Load) 처리: src가 loading_img.gif인 경우 실제 이미지로 교체
-            contentDiv.find('img').each((i, el) => {
+            // Preserve line breaks
+            contentDiv.find('br').replaceWith('\n');
+            contentDiv.find('p').each((_i, el) => { $(el).append('\n'); });
+
+            contentDiv.find('img').each((_i, el) => {
                 const $img = $(el);
                 const realSrc = $img.attr('data-original') || $img.attr('data-src') || $img.attr('data-lazy-src');
                 if (realSrc) {
@@ -120,25 +159,33 @@ const INTERNAL_SCRAPER = {
 
             const images = [];
             const dccons = [];
-            
-            // 이미지 주소만 빠르게 추출
-            contentDiv.find('img').each((i, el) => {
+
+            contentDiv.find('img').each((_i, el) => {
                 const $img = $(el);
                 let src = $img.attr('data-original') || $img.attr('data-src') || $img.attr('data-lazy-src') || $img.attr('src');
                 if (!src) return;
                 if (src.startsWith('//')) src = 'https:' + src;
                 else if (src.startsWith('/')) src = 'https://gall.dcinside.com' + src;
-                
-                if (src.includes('dccon.php') || src.includes('/dccon/')) dccons.push(src);
-                else if (!src.includes('loading_img.gif')) images.push(src);
+
+                if (src.includes('dccon.php') || src.includes('/dccon/')) {
+                    dccons.push(src);
+                    $img.addClass('dccon-img');
+                    $img.attr('src', src);
+                } else if (!src.includes('loading_img.gif')) {
+                    images.push(src);
+                }
             });
 
-            const plainText = contentDiv.text().replace(/\s\s+/g, ' ').trim();
+            const plainText = contentDiv.text().trim();
             const fullHtml = contentDiv.html();
-            
+
             return { id, plainText, images, dccons, originUrl: url, fullHtml };
         } catch (e) {
-            if (retry < 2) return this.getDetail(gallery, path, id, retry + 1);
+            if (retry < 2) {
+                // Increased retry delay: 2-3.5s (jitter + 1000ms)
+                await sleep(getJitter() + 1000);
+                return this.getDetail(gallery, path, id, retry + 1);
+            }
             return { id, plainText: "내용을 불러올 수 없습니다.", images: [], dccons: [], originUrl: url, fullHtml: "" };
         }
     }
@@ -149,27 +196,33 @@ const PostItem = React.memo(({ item, onOpenDetail, onOpenWebView, onImagePress, 
   const displayImages = detail?.images || [];
   const displayDccons = detail?.dccons || [];
   const previewText = detail?.plainText || "";
+  const isLoading = !detail || (!detail.plainText && !detail.images);
 
   return (
     <View style={[styles.postContainer, { height: itemHeight }]}>
       <View style={[styles.imageSection, { height: itemHeight * 0.55 }]}>
-        {displayImages.length > 0 ? (
+        {isLoading ? (
+          <View style={[styles.image, styles.noImage, { height: itemHeight * 0.55 }]}>
+            <ActivityIndicator size="large" color="#666" />
+            <Text style={styles.loadingText}>콘텐츠 로딩 중...</Text>
+          </View>
+        ) : displayImages.length > 0 ? (
           <FlatList
             data={displayImages}
             horizontal
             pagingEnabled
             showsHorizontalScrollIndicator={false}
-            keyExtractor={(_, i) => i.toString()}
+            keyExtractor={(_item, i) => i.toString()}
             initialNumToRender={1}
             maxToRenderPerBatch={1}
             windowSize={3}
             removeClippedSubviews={true}
             renderItem={({ item: img, index }) => (
               <TouchableOpacity activeOpacity={0.9} onPress={() => onImagePress(displayImages, index)}>
-                <Image 
-                  source={{ uri: img, headers: { 'Referer': 'https://gall.dcinside.com/', 'User-Agent': USER_AGENTS[0] } }} 
-                  style={{ width, height: itemHeight * 0.55 }} 
-                  resizeMode="contain" 
+                <Image
+                  source={{ uri: img, headers: { 'Referer': 'https://gall.dcinside.com/', 'User-Agent': USER_AGENTS[0] } }}
+                  style={{ width, height: itemHeight * 0.55 }}
+                  resizeMode="contain"
                 />
               </TouchableOpacity>
             )}
@@ -185,23 +238,32 @@ const PostItem = React.memo(({ item, onOpenDetail, onOpenWebView, onImagePress, 
                 <View style={styles.avatar}><User color="white" size={18} /></View>
                 <Text style={styles.titleText} numberOfLines={1}>{item.title}</Text>
             </View>
-            <Text style={styles.bodyPreviewText} numberOfLines={2}>{previewText}</Text>
-            
-            {displayDccons.length > 0 && (
-                <View style={styles.previewDcconRow}>
-                    {displayDccons.slice(0, 5).map((url, i) => (
-                        <Image 
-                            key={i} 
-                            source={{ uri: url, headers: { 'Referer': 'https://gall.dcinside.com/', 'User-Agent': USER_AGENTS[0] } }} 
-                            style={styles.previewDccon} 
-                            resizeMode="contain" 
-                        />
-                    ))}
-                    {displayDccons.length > 5 && <Text style={styles.moreDcconText}>+{displayDccons.length - 5}</Text>}
-                </View>
+            {isLoading ? (
+              <View style={styles.loadingPlaceholder}>
+                <View style={styles.loadingLine} />
+                <View style={[styles.loadingLine, styles.loadingLineShort]} />
+              </View>
+            ) : (
+              <>
+                <Text style={styles.bodyPreviewText} numberOfLines={2}>{previewText}</Text>
+
+                {displayDccons.length > 0 && (
+                    <View style={styles.previewDcconRow}>
+                        {displayDccons.slice(0, 5).map((url, i) => (
+                            <Image
+                                key={i}
+                                source={{ uri: url, headers: { 'Referer': 'https://gall.dcinside.com/', 'User-Agent': USER_AGENTS[0] } }}
+                                style={styles.previewDccon}
+                                resizeMode="contain"
+                            />
+                        ))}
+                        {displayDccons.length > 5 && <Text style={styles.moreDcconText}>+{displayDccons.length - 5}</Text>}
+                    </View>
+                )}
+
+                <Text style={styles.seeMoreBtn}>...내용 전체 보기 (클릭)</Text>
+              </>
             )}
-            
-            <Text style={styles.seeMoreBtn}>...내용 전체 보기 (클릭)</Text>
         </TouchableOpacity>
       </View>
 
@@ -232,7 +294,6 @@ export default function App() {
   const [currentImages, setCurrentImages] = useState([]);
   const [initialImageIndex, setInitialImageIndex] = useState(0);
 
-  // 갤러리별 데이터 캐시 및 관리 상태
   const [galleriesState, setGalleriesState] = useState({});
   const [editGallery, setEditGallery] = useState(null);
   const [newNameInput, setNewNameInput] = useState('');
@@ -245,71 +306,25 @@ export default function App() {
     stateRef.current = { posts, loading, currentGallery, page, offset, currentIndex };
   }, [posts, loading, currentGallery, page, offset, currentIndex]);
 
-  const saveGalleries = async (list) => {
+  const saveGalleries = useCallback(async (list) => {
     try {
       await AsyncStorage.setItem('galleries', JSON.stringify(list));
     } catch (e) { console.error(e); }
-  };
-
-  const loadGalleries = async () => {
-    try {
-      const saved = await AsyncStorage.getItem('galleries');
-      if (saved) {
-        const list = JSON.parse(saved);
-        setGalleries(list);
-        if (list.length > 0) switchGallery(list[0], true);
-      } else {
-        switchGallery(galleries[0], true);
-      }
-    } catch (e) { console.error(e); }
-  };
-
-  useEffect(() => {
-    loadGalleries();
   }, []);
 
-  const switchGallery = (targetGallery, isInitial = false) => {
-    const prevGal = stateRef.current.currentGallery;
-    
-    // 현재 상태 저장
-    if (prevGal && !isInitial) {
-      setGalleriesState(prev => ({
-        ...prev,
-        [prevGal.id]: {
-          posts: stateRef.current.posts,
-          page: stateRef.current.page,
-          offset: stateRef.current.offset,
-          currentIndex: stateRef.current.currentIndex
-        }
-      }));
-    }
+  const fetchPosts = useCallback(async (galId, pageNum, currentOffset, refresh = false) => {
+    if (!galId) return;
+    if (stateRef.current.loading) return; // Prevent concurrent fetches
 
-    // 대상 상태 복원
-    const s = galleriesState[targetGallery.id] || { posts: [], page: 1, offset: 0, currentIndex: 0 };
-    setPosts(s.posts);
-    setPage(s.page);
-    setOffset(s.offset);
-    setCurrentIndex(s.currentIndex);
-    setCurrentGallery(targetGallery);
-
-    if (s.posts.length === 0) {
-      fetchPosts(targetGallery.id, 1, 0, true);
-    } else {
-        setTimeout(() => {
-            if (listRef.current && s.currentIndex > 0) {
-                listRef.current.scrollToIndex({ index: s.currentIndex, animated: false });
-            }
-        }, 100);
-    }
-  };
-
-  const fetchPosts = async (galId, pageNum, currentOffset, refresh = false) => {
-    if (loading || !galId) return;
     setLoading(true);
     try {
       const data = await INTERNAL_SCRAPER.fetchList(galId, pageNum, currentOffset);
       if (data && data.posts) {
         setPosts(prev => {
+          if (refresh) {
+            allFetchedIdsRef.current.clear(); // Clear on refresh
+          }
+
           const newPosts = data.posts.filter(p => !allFetchedIdsRef.current.has(p.id));
           newPosts.forEach(p => allFetchedIdsRef.current.add(p.id));
 
@@ -331,7 +346,76 @@ export default function App() {
       console.error("Fetch error:", e);
     }
     setLoading(false);
-  };
+  }, []);
+
+  const switchGallery = useCallback((targetGallery, isInitial = false) => {
+    const prevGal = stateRef.current.currentGallery;
+
+    // Save current gallery state before switching
+    if (prevGal && !isInitial) {
+      setGalleriesState(prev => ({
+        ...prev,
+        [prevGal.id]: {
+          posts: stateRef.current.posts,
+          page: stateRef.current.page,
+          offset: stateRef.current.offset,
+          currentIndex: stateRef.current.currentIndex
+        }
+      }));
+    }
+
+    // Get saved state for target gallery
+    setGalleriesState(prev => {
+      const s = prev[targetGallery.id] || { posts: [], page: 1, offset: 0, currentIndex: 0 };
+
+      // Update all states outside of setGalleriesState callback
+      setPosts(s.posts);
+      setPage(s.page);
+      setOffset(s.offset);
+      setCurrentIndex(s.currentIndex);
+      setCurrentGallery(targetGallery);
+
+      // Fetch new posts if gallery is empty
+      if (s.posts.length === 0) {
+        // Use setTimeout to ensure state updates complete first
+        setTimeout(() => {
+          fetchPosts(targetGallery.id, 1, 0, true);
+        }, 0);
+      } else {
+        // Restore scroll position for existing gallery
+        setTimeout(() => {
+          if (listRef.current && s.currentIndex > 0) {
+            try {
+              listRef.current.scrollToIndex({ index: s.currentIndex, animated: false });
+            } catch (e) {
+              console.warn("Scroll index error:", e);
+            }
+          }
+        }, 100);
+      }
+
+      return prev;
+    });
+  }, [fetchPosts]);
+
+  const loadGalleries = useCallback(async () => {
+    try {
+      const saved = await AsyncStorage.getItem('galleries');
+      if (saved) {
+        const list = JSON.parse(saved);
+        setGalleries(list);
+        if (list.length > 0) switchGallery(list[0], true);
+      } else {
+        const defaultGallery = { id: 'manosaba', name: '마녀재판' };
+        switchGallery(defaultGallery, true);
+      }
+    } catch (e) { console.error(e); }
+  }, [switchGallery]);
+
+  useEffect(() => {
+    void loadGalleries();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleImagePress = (images, index) => {
     setCurrentImages(images);
@@ -355,7 +439,7 @@ export default function App() {
     if (!newNameInput.trim()) return;
     const newList = galleries.map(g => g.id === editGallery.id ? { ...g, name: newNameInput.trim() } : g);
     setGalleries(newList);
-    saveGalleries(newList);
+    void saveGalleries(newList);
     if (currentGallery?.id === editGallery.id) {
         setCurrentGallery({ ...currentGallery, name: newNameInput.trim() });
     }
@@ -365,7 +449,7 @@ export default function App() {
   const deleteGallery = (id) => {
     const newGalleries = galleries.filter(g => g.id !== id);
     setGalleries(newGalleries);
-    saveGalleries(newGalleries);
+    void saveGalleries(newGalleries);
     if (currentGallery?.id === id) {
       if (newGalleries.length > 0) switchGallery(newGalleries[0]);
       else { setPosts([]); setCurrentGallery(null); }
@@ -385,7 +469,7 @@ export default function App() {
       const newG = { id, name: id };
       const newGalleries = [...galleries, newG];
       setGalleries(newGalleries);
-      saveGalleries(newGalleries);
+      void saveGalleries(newGalleries);
       setUrlInput("");
       setShowInput(false);
       switchGallery(newG);
@@ -397,38 +481,12 @@ export default function App() {
       const newIndex = viewableItems[0].index;
       setCurrentIndex(newIndex);
       
-      const { posts, loading, currentGallery, page, offset } = stateRef.current;
-      // 현재 글 제외하고 15개 이하로 남았을 때 추가 로드 (최대 15개 선로딩 유지)
-      if (newIndex + 15 >= posts.length && !loading && currentGallery) {
-        fetchPosts(currentGallery.id, page, offset);
+      const { posts, loading: isLoading, currentGallery: gal, page: p, offset: o } = stateRef.current;
+      if (newIndex + 15 >= posts.length && !isLoading && gal) {
+        void fetchPosts(gal.id, p, o);
       }
     }
   }).current;
-
-  const renderSequentialContent = () => {
-    if (!selectedPost || !selectedPost.detail || !selectedPost.detail.structuredBody) return null;
-    const allImages = selectedPost.detail.images || [];
-
-    return selectedPost.detail.structuredBody.map((item, index) => {
-      if (item.type === 'text') {
-        return <Text key={index} style={styles.detailText}>{item.content}</Text>;
-      } else if (item.type === 'image') {
-        const imgIndex = allImages.findIndex(url => url === item.content);
-        return (
-          <TouchableOpacity key={index} activeOpacity={0.9} onPress={() => handleImagePress(allImages, imgIndex >= 0 ? imgIndex : 0)}>
-            <Image source={{ uri: item.content, headers: { 'Referer': 'https://gall.dcinside.com/', 'User-Agent': USER_AGENTS[0] } }} style={styles.detailImage} resizeMode="contain" />
-          </TouchableOpacity>
-        );
-      } else if (item.type === 'dccon') {
-        return (
-          <View key={index} style={styles.dcconContainer}>
-            <Image source={{ uri: item.content, headers: { 'Referer': 'https://gall.dcinside.com/', 'User-Agent': USER_AGENTS[0] } }} style={styles.dcconImage} resizeMode="contain" />
-          </View>
-        );
-      }
-      return null;
-    });
-  };
 
   return (
     <SafeAreaView style={styles.container}>
@@ -479,7 +537,7 @@ export default function App() {
                 showsVerticalScrollIndicator={false} 
                 onViewableItemsChanged={onViewableItemsChanged}
                 viewabilityConfig={{ itemVisiblePercentThreshold: 50 }}
-                getItemLayout={(data, index) => ({ length: listLayoutHeight, offset: listLayoutHeight * index, index })}
+                getItemLayout={(_data, index) => ({ length: listLayoutHeight, offset: listLayoutHeight * index, index })}
                 removeClippedSubviews={true}
                 initialNumToRender={2}
                 maxToRenderPerBatch={2}
@@ -524,8 +582,9 @@ export default function App() {
               originWhitelist={['*']}
               source={{ 
                 html: `
-                  <html>
+                  <html lang="ko">
                     <head>
+                      <meta charset="utf-8">
                       <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
                       <style>
                         body { 
@@ -540,6 +599,15 @@ export default function App() {
                           height: auto !important; 
                           border-radius: 8px;
                           margin-bottom: 10px;
+                        }
+                        img.dccon-img {
+                          max-width: 60px !important;
+                          width: 60px !important;
+                          height: auto !important;
+                          display: inline-block !important;
+                          vertical-align: middle;
+                          margin: 2px !important;
+                          border-radius: 0px !important;
                         }
                         .write_div { width: 100% !important; }
                         a { color: #58a6ff; text-decoration: none; }
@@ -568,14 +636,30 @@ export default function App() {
             <Text style={styles.modalTitle} numberOfLines={1}>원본 웹페이지</Text>
             <TouchableOpacity onPress={() => setShowWebViewModal(false)}><X color="white" size={30} /></TouchableOpacity>
           </View>
-          {selectedPost && <WebView source={{ uri: selectedPost.detail?.originUrl }} style={{ flex: 1 }} startInLoadingState={true} renderLoading={() => <ActivityIndicator color="white" style={{ position: 'absolute', top: '50%', left: '50%' }} />} />}
+          {selectedPost && <WebView source={{ uri: selectedPost.detail?.originUrl || '' }} style={{ flex: 1 }} startInLoadingState={true} renderLoading={() => <ActivityIndicator color="white" style={{ position: 'absolute', top: '50%', left: '50%' }} />} />}
         </SafeAreaView>
       </Modal>
 
       <Modal visible={showImageModal} transparent={true} animationType="fade" onRequestClose={() => setShowImageModal(false)}>
         <View style={styles.fullImageContainer}>
           <TouchableOpacity style={styles.imageCloseBtn} onPress={() => setShowImageModal(false)}><X color="white" size={35} /></TouchableOpacity>
-          <FlatList data={currentImages} horizontal pagingEnabled initialScrollIndex={initialImageIndex} getItemLayout={(data, index) => ({ length: width, offset: width * index, index })} keyExtractor={(_, i) => i.toString()} renderItem={({ item }) => (<View style={styles.fullImageWrapper}><Image source={{ uri: item, headers: { 'Referer': 'https://gall.dcinside.com/', 'User-Agent': USER_AGENTS[0] } }} style={styles.fullImage} resizeMode="contain" /></View>)} />
+          <FlatList 
+            data={currentImages} 
+            horizontal 
+            pagingEnabled 
+            initialScrollIndex={initialImageIndex} 
+            getItemLayout={(_data, index) => ({ length: width, offset: width * index, index })} 
+            keyExtractor={(_item, i) => i.toString()} 
+            renderItem={({ item }) => (
+                <View style={styles.fullImageWrapper}>
+                    <Image 
+                        source={{ uri: item, headers: { 'Referer': 'https://gall.dcinside.com/', 'User-Agent': USER_AGENTS[0] } }} 
+                        style={styles.fullImage} 
+                        resizeMode="contain" 
+                    />
+                </View>
+            )} 
+          />
         </View>
       </Modal>
     </SafeAreaView>
@@ -604,14 +688,14 @@ const styles = StyleSheet.create({
   avatar: { width: 24, height: 24, borderRadius: 12, backgroundColor: '#333', justifyContent: 'center', alignItems: 'center', marginRight: 10 },
   titleText: { color: '#fff', fontSize: 17, fontWeight: 'bold', flex: 1 },
   bodyPreviewText: { color: '#aaa', fontSize: 14, marginTop: 8, lineHeight: 20 },
+  loadingPlaceholder: { marginTop: 8, marginBottom: 10 },
+  loadingLine: { height: 14, backgroundColor: '#222', borderRadius: 4, marginBottom: 8 },
+  loadingLineShort: { width: '70%' },
   previewDcconRow: { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
   previewDccon: { width: 50, height: 50, marginRight: 8 },
   moreDcconText: { color: '#666', fontSize: 14, fontWeight: 'bold' },
   textScrollArea: { flex: 1, marginTop: 5 },
-  bodyText: { color: '#bbb', fontSize: 15, lineHeight: 22 },
   seeMoreBtn: { color: '#555', marginTop: 10, fontSize: 12, fontWeight: 'bold' },
-  previewDcconContainer: { marginVertical: 5, alignItems: 'flex-start' },
-  previewDccon: { width: 60, height: 60 },
   actions: { position: 'absolute', right: 15, bottom: 60 },
   actionBtn: { marginBottom: 20, backgroundColor: 'rgba(0,0,0,0.5)', padding: 10, borderRadius: 30 },
   centerLoading: { flex: 1, justifyContent: 'center', alignItems: 'center' },
@@ -621,11 +705,6 @@ const styles = StyleSheet.create({
   modalHeader: { flexDirection: 'row', alignItems: 'center', padding: 15, borderBottomWidth: 1, borderBottomColor: '#222' },
   modalTitle: { color: '#fff', fontSize: 16, fontWeight: 'bold', flex: 1, marginHorizontal: 10 },
   closeBtn: { padding: 5 },
-  detailScroll: { flex: 1, padding: 15 },
-  detailText: { color: '#eee', fontSize: 16, lineHeight: 24, marginBottom: 5 },
-  detailImage: { width: width - 30, height: 300, marginBottom: 15, borderRadius: 5 },
-  dcconContainer: { marginBottom: 10, alignItems: 'flex-start' },
-  dcconImage: { width: 100, height: 100 },
   fullImageContainer: { flex: 1, backgroundColor: 'rgba(0,0,0,1)', justifyContent: 'center' },
   fullImageWrapper: { width, height: '100%', justifyContent: 'center', alignItems: 'center' },
   fullImage: { width: width, height: '100%' },
