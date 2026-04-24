@@ -1,0 +1,28 @@
+<resources>
+    <string name="app_name">dc_reels</string>
+    <string name="add_gallery">갤러리 추가</string>
+    <string name="add">추가</string>
+    <string name="cancel">취소</string>
+    <string name="gallery_list_title">갤러리 목록</string>
+    <string name="add_gallery_hint">DC 갤러리 링크를 입력하세요 (모바일/PC 링크 모두 가능)</string>
+    <string name="gallery_link_hint">예: https://gall.dcinside.com/board/lists/?id=baseball_new11</string>
+    <string name="delete_gallery">갤러리 삭제</string>
+    <string name="edit_gallery_name">갤러리 이름 편집</string>
+    <string name="save">저장</string>
+    <string name="gallery_deleted">갤러리를 삭제했습니다.</string>
+    <string name="undo">실행 취소</string>
+    <string name="invalid_gallery_link_message">링크 형식이 올바르지 않습니다.</string>
+    <string name="empty_posts">갤러리를 추가한 뒤 게시글을 불러오세요.</string>
+    <string name="post_load_failed">게시글을 불러오지 못했습니다.</string>
+    <string name="post_empty_for_gallery">선택한 갤러리에 표시할 게시글이 없습니다.</string>
+    <string name="post_image">게시글 이미지</string>
+    <string name="no_image">이미지 없음</string>
+    <string name="post_detail">게시글 상세</string>
+    <string name="post_meta_format">작성자: %1$s\n작성일: %2$s\n추천: %3$d / 조회: %4$d</string>
+    <string name="open_comments">댓글 보기</string>
+    <string name="sort_newest">최신순</string>
+    <string name="sort_oldest">오래된순</string>
+    <string name="empty_comments">댓글이 없습니다.</string>
+    <string name="load_more_comments">댓글 더 보기</string>
+    <string name="comment_load_failed">댓글을 불러오지 못했습니다.</string>
+</resources>
