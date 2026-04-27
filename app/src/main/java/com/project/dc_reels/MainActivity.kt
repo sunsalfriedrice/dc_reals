@@ -14,18 +14,26 @@ import androidx.core.view.GravityCompat
 import androidx.drawerlayout.widget.DrawerLayout
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
+import com.google.android.material.bottomsheet.BottomSheetBehavior
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.snackbar.Snackbar
 import com.project.dc_reels.data.DcRepository
 import com.project.dc_reels.data.GalleryStore
+import com.project.dc_reels.model.DcPost
 import com.project.dc_reels.model.GalleryConfig
 import com.project.dc_reels.ui.GalleryDrawerAdapter
 import com.project.dc_reels.ui.comments.CommentsActivity
+import com.project.dc_reels.ui.detail.ImageViewerActivity
 import com.project.dc_reels.ui.detail.PostDetailActivity
+import com.project.dc_reels.ui.detail.PostContentAdapter
+import com.project.dc_reels.ui.detail.SimpleImagePagerAdapter
 import com.project.dc_reels.ui.reels.ReelsPagerAdapter
 import com.project.dc_reels.util.GalleryUrlNormalizer
 import android.content.Intent
+import android.widget.ImageView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -63,6 +71,12 @@ class MainActivity : AppCompatActivity() {
                 startActivity(intent)
             },
             onOpenDetail = { post ->
+                showDetailBottomSheet(post)
+            },
+            onOpenImages = { post ->
+                openImageViewerFromPost(post)
+            },
+            onOpenOriginal = { post ->
                 val intent = Intent(this, PostDetailActivity::class.java).apply {
                     putExtra(PostDetailActivity.EXTRA_POST_URL, post.url)
                     putExtra(PostDetailActivity.EXTRA_POST_TITLE, post.title)
@@ -223,5 +237,103 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton(R.string.cancel, null)
             .show()
+    }
+
+    private fun showDetailBottomSheet(post: DcPost) {
+        val content = LayoutInflater.from(this).inflate(R.layout.bottom_sheet_post_detail, null)
+        val dialog = BottomSheetDialog(this)
+        dialog.setContentView(content)
+
+        val loadingView = content.findViewById<ProgressBar>(R.id.detailSheetLoading)
+        val titleView = content.findViewById<TextView>(R.id.detailSheetTitle)
+        val contentRecycler = content.findViewById<RecyclerView>(R.id.detailSheetContentRecycler)
+        val openComments = content.findViewById<Button>(R.id.detailSheetCommentsButton)
+        val contentAdapter = PostContentAdapter { clickedUrl ->
+            val allImageUrls = contentAdapterCurrentImageUrls
+            val index = allImageUrls.indexOf(clickedUrl).takeIf { it >= 0 } ?: 0
+            openImageViewer(allImageUrls, index)
+        }
+        contentRecycler.layoutManager = LinearLayoutManager(this)
+        contentRecycler.adapter = contentAdapter
+
+        var contentAdapterCurrentImageUrls: List<String> = emptyList()
+
+        titleView.text = post.title
+        contentAdapter.submitList(emptyList())
+
+        openComments.setOnClickListener {
+            val intent = Intent(this, CommentsActivity::class.java).apply {
+                putExtra(CommentsActivity.EXTRA_POST_URL, post.url)
+                putExtra(CommentsActivity.EXTRA_POST_TITLE, post.title)
+            }
+            startActivity(intent)
+        }
+
+        dialog.setOnShowListener {
+            val bottomSheet = dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
+            bottomSheet?.let {
+                val behavior = BottomSheetBehavior.from(it)
+                behavior.state = BottomSheetBehavior.STATE_EXPANDED
+                behavior.skipCollapsed = false
+                behavior.peekHeight = (resources.displayMetrics.heightPixels * 0.7f).toInt()
+            }
+        }
+        dialog.show()
+
+        lifecycleScope.launch {
+            loadingView.visibility = View.VISIBLE
+            val detail = withContext(Dispatchers.IO) {
+                runCatching { repository.fetchPostDetail(post.url) }.getOrNull()
+            }
+            loadingView.visibility = View.GONE
+            if (detail == null) {
+                contentAdapter.submitList(emptyList())
+                Toast.makeText(this@MainActivity, getString(R.string.post_load_failed), Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+
+            if (detail.title.isNotBlank()) {
+                titleView.text = detail.title
+            }
+
+            val blocks = if (detail.contentBlocks.isNotEmpty()) {
+                detail.contentBlocks
+            } else {
+                listOf(com.project.dc_reels.model.PostContentBlock(type = com.project.dc_reels.model.PostContentBlock.Type.TEXT, text = detail.bodyText.ifBlank { post.preview }))
+            }
+            contentAdapterCurrentImageUrls = blocks.mapNotNull { it.imageUrl }.distinct()
+            contentAdapter.submitList(blocks)
+        }
+    }
+
+    private fun openImageViewerFromPost(post: DcPost) {
+        val cached = post.imageUrls
+        if (cached.isNotEmpty()) {
+            openImageViewer(cached, 0)
+            return
+        }
+
+        lifecycleScope.launch {
+            loading.visibility = View.VISIBLE
+            val detail = withContext(Dispatchers.IO) {
+                runCatching { repository.fetchPostDetail(post.url) }.getOrNull()
+            }
+            loading.visibility = View.GONE
+
+            val images = detail?.imageUrls.orEmpty()
+            if (images.isEmpty()) {
+                Toast.makeText(this@MainActivity, getString(R.string.no_image), Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            openImageViewer(images, 0)
+        }
+    }
+
+    private fun openImageViewer(imageUrls: List<String>, startIndex: Int) {
+        val intent = Intent(this, ImageViewerActivity::class.java).apply {
+            putStringArrayListExtra(ImageViewerActivity.EXTRA_IMAGE_URLS, ArrayList(imageUrls))
+            putExtra(ImageViewerActivity.EXTRA_START_INDEX, startIndex)
+        }
+        startActivity(intent)
     }
 }

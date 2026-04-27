@@ -17,6 +17,10 @@
             android:name=".ui.comments.CommentsActivity"
             android:exported="false" />
         <activity
+            android:name=".ui.detail.ImageViewerActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Dc_reels" />
+        <activity
             android:name=".ui.detail.PostDetailActivity"
             android:exported="false" />
         <activity

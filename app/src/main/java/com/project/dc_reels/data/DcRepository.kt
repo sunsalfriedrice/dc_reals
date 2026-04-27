@@ -2,11 +2,17 @@ package com.project.dc_reels.data
 
 import com.project.dc_reels.model.DcComment
 import com.project.dc_reels.model.DcPost
+import com.project.dc_reels.model.DcPostDetail
+import com.project.dc_reels.model.PostContentBlock
 import com.project.dc_reels.parser.GalleryMetaParser
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import org.jsoup.nodes.Node
+import org.jsoup.nodes.TextNode
+import java.net.URLDecoder
 import java.net.URI
+import java.nio.charset.StandardCharsets
 import kotlin.random.Random
 
 class DcRepository {
@@ -73,7 +79,7 @@ class DcRepository {
             if (isPinned) return@mapNotNull null
 
             val titleNode = row.selectFirst("td.gall_tit a") ?: return@mapNotNull null
-            val title = titleNode.text().trim()
+            val title = sanitizeSpoilerText(titleNode.text().trim())
             val href = titleNode.absUrl("href")
             if (title.isBlank() || href.isBlank()) return@mapNotNull null
 
@@ -106,7 +112,9 @@ class DcRepository {
         return doc.select("ul.gall-detail-lst > li").mapNotNull { item ->
             val link = item.selectFirst("a.lt") ?: return@mapNotNull null
             val href = link.absUrl("href")
-            val title = item.selectFirst(".subjectin")?.text()?.trim().orEmpty()
+            val titleNode = item.selectFirst(".subjectin")?.clone()
+            titleNode?.select(".spoiler")?.remove()
+            val title = sanitizeSpoilerText(titleNode?.text()?.trim().orEmpty())
             if (href.isBlank() || title.isBlank()) return@mapNotNull null
 
             val writer = item.selectFirst(".ginfo .list-nick")?.text()?.trim().orEmpty()
@@ -125,7 +133,8 @@ class DcRepository {
                 recommend = recommend,
                 viewCount = views,
                 preview = title,
-                imageUrl = null
+                imageUrl = null,
+                imageUrls = emptyList()
             )
         }
     }
@@ -145,58 +154,242 @@ class DcRepository {
                 val detail = fetchPostDetailPreview(post.url)
                 post.copy(
                     preview = detail.preview.ifBlank { post.title },
-                    imageUrl = detail.imageUrl
+                    imageUrl = detail.imageUrls.firstOrNull(),
+                    imageUrls = detail.imageUrls
                 )
             }.getOrDefault(post)
         }
     }
 
     private fun fetchPostDetailPreview(postUrl: String): PostDetailPreview {
+        val detail = fetchPostDetail(postUrl)
+        val preview = detail.bodyText
+            ?.replace(Regex("\\s+"), " ")
+            ?.trim()
+            ?.take(PREVIEW_MAX_CHARS)
+            .orEmpty()
+
+        return PostDetailPreview(
+            preview = preview,
+            imageUrls = detail.imageUrls
+        )
+    }
+
+    fun fetchPostDetail(postUrl: String): DcPostDetail {
+        val mobileUrl = toMobilePostUrl(postUrl)
         politeDelay()
-        val doc = Jsoup.connect(postUrl)
+        val doc = Jsoup.connect(mobileUrl)
             .userAgent(MOBILE_USER_AGENT)
             .timeout(TIMEOUT_MS)
             .ignoreHttpErrors(true)
             .get()
 
         val body = doc.selectFirst(".thum-txtin, .write_div, .writing_view_box")
-        val preview = body?.text()
-            ?.replace(Regex("\\s+"), " ")
+        val bodyClone = body?.clone()?.apply {
+            select(".spoiler, [class*=spoiler], [id*=spoiler]").remove()
+        }
+        val bodyText = sanitizeSpoilerText(bodyClone?.text()?.trim().orEmpty())
+
+        val imageUrls = extractImageUrls(bodyClone, doc, mobileUrl)
+        val contentBlocks = buildContentBlocks(bodyClone, mobileUrl)
+        val title = doc.selectFirst(".gallview-tit, .title-subject, .title_subject, .title")
+            ?.text()
             ?.trim()
-            ?.take(PREVIEW_MAX_CHARS)
+            .orEmpty()
+            .let(::sanitizeSpoilerText)
+        val writer = doc.selectFirst(".ginfo li.list-nick, .gall_writer, .nickname")
+            ?.text()
+            ?.trim()
+            .orEmpty()
+        val dateText = doc.selectFirst(".ginfo li:nth-child(3), .gall_date, .date")
+            ?.text()
+            ?.trim()
             .orEmpty()
 
-        val imageNode = doc.selectFirst(
-            ".thum-txtin img[data-original], .thum-txtin img[src], .write_div img[data-original], .write_div img[src], .writing_view_box img[src]"
+        return DcPostDetail(
+            title = title,
+            writer = writer,
+            dateText = dateText,
+            bodyText = bodyText,
+            imageUrls = imageUrls,
+            contentBlocks = contentBlocks
         )
-        val imageRaw = imageNode?.attr("data-original")
-            ?.ifBlank { imageNode.attr("src") }
-            .orEmpty()
+    }
 
-        return PostDetailPreview(
-            preview = preview,
-            imageUrl = normalizeImageUrl(postUrl, imageRaw)
-        )
+    fun toMobilePostUrl(rawPostUrl: String): String {
+        val normalized = normalizeUrl(rawPostUrl)
+        if (normalized.contains("m.dcinside.com/board/")) {
+            return normalized.substringBefore("#")
+        }
+
+        val uri = runCatching { URI(normalized) }.getOrNull()
+        val query = uri?.rawQuery.orEmpty()
+        val params = parseQuery(query)
+        val id = params["id"].orEmpty()
+        val no = params["no"].orEmpty()
+        if (id.isNotBlank() && no.isNotBlank()) {
+            return "https://m.dcinside.com/board/$id/$no"
+        }
+
+        val match = Regex("/board/([^/?#]+)/([0-9]+)").find(normalized)
+        if (match != null) {
+            return "https://m.dcinside.com/board/${match.groupValues[1]}/${match.groupValues[2]}"
+        }
+
+        return normalized
     }
 
     private fun normalizeImageUrl(baseUrl: String, raw: String): String? {
-        if (raw.isBlank()) return null
-        if (raw.startsWith("http://") || raw.startsWith("https://")) return raw
+        val cleaned = raw.trim().removePrefix("\"").removeSuffix("\"")
+        if (cleaned.isBlank()) return null
+        if (cleaned.startsWith("//")) return "https:$cleaned"
+        if (cleaned.startsWith("http://") || cleaned.startsWith("https://")) return cleaned
         return runCatching {
-            URI(baseUrl).resolve(raw).toString()
+            URI(baseUrl).resolve(cleaned).toString()
         }.getOrNull()
     }
 
+    private fun extractImageUrls(body: Element?, doc: Document, baseUrl: String): List<String> {
+        if (body == null) return emptyList()
+        val urls = body.select("img[data-original], img[src]")
+            .mapNotNull { img ->
+                if (isSpoilerImage(img)) return@mapNotNull null
+                val raw = img.attr("data-original")
+                    .ifBlank { img.attr("data-src") }
+                    .ifBlank { img.attr("src") }
+                val normalized = normalizeImageUrl(baseUrl, raw).orEmpty()
+                if (normalized.isBlank()) return@mapNotNull null
+                if (normalized.contains("gallview_loading_ori.gif") || normalized.contains("dccon_loading")) {
+                    return@mapNotNull null
+                }
+                normalized
+            }
+
+        if (urls.isNotEmpty()) return urls.distinct()
+
+        // Fallback for rare pages where body image tags are rewritten but og:image is present.
+        val ogImage = doc.selectFirst("meta[property=og:image]")
+            ?.attr("content")
+            .orEmpty()
+        val fallback = normalizeImageUrl(baseUrl, ogImage)
+        return listOfNotNull(fallback)
+    }
+
+    private fun buildContentBlocks(body: Element?, baseUrl: String): List<PostContentBlock> {
+        if (body == null) return emptyList()
+        val blocks = mutableListOf<PostContentBlock>()
+        collectContentBlocks(body, baseUrl, blocks)
+        return mergeAdjacentTextBlocks(blocks)
+    }
+
+    private fun collectContentBlocks(node: Node, baseUrl: String, out: MutableList<PostContentBlock>) {
+        when (node) {
+            is TextNode -> {
+                val text = sanitizeSpoilerText(node.text().trim())
+                if (text.isNotBlank()) {
+                    out += PostContentBlock(type = PostContentBlock.Type.TEXT, text = text)
+                }
+            }
+
+            is Element -> {
+                val classInfo = node.className().lowercase()
+                val idInfo = node.id().lowercase()
+                if (classInfo.contains("spoiler") || idInfo.contains("spoiler")) {
+                    return
+                }
+
+                if (node.normalName() == "img") {
+                    if (isSpoilerImage(node)) return
+                    val raw = node.attr("data-original")
+                        .ifBlank { node.attr("data-src") }
+                        .ifBlank { node.attr("src") }
+                    val normalized = normalizeImageUrl(baseUrl, raw).orEmpty()
+                    if (
+                        normalized.isBlank() ||
+                        normalized.contains("gallview_loading_ori.gif") ||
+                        normalized.contains("dccon_loading")
+                    ) {
+                        return
+                    }
+                    out += PostContentBlock(type = PostContentBlock.Type.IMAGE, imageUrl = normalized)
+                    return
+                }
+
+                node.childNodes().forEach { child ->
+                    collectContentBlocks(child, baseUrl, out)
+                }
+
+                if (node.normalName() == "p" || node.normalName() == "div") {
+                    if (out.lastOrNull()?.type == PostContentBlock.Type.TEXT) {
+                        out += PostContentBlock(type = PostContentBlock.Type.TEXT, text = "\n")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun mergeAdjacentTextBlocks(blocks: List<PostContentBlock>): List<PostContentBlock> {
+        if (blocks.isEmpty()) return blocks
+        val merged = mutableListOf<PostContentBlock>()
+        val textBuffer = StringBuilder()
+
+        fun flushText() {
+            val text = textBuffer.toString().replace(Regex("\\n{3,}"), "\n\n").trim()
+            if (text.isNotBlank()) {
+                merged += PostContentBlock(type = PostContentBlock.Type.TEXT, text = text)
+            }
+            textBuffer.clear()
+        }
+
+        blocks.forEach { block ->
+            if (block.type == PostContentBlock.Type.TEXT) {
+                if (textBuffer.isNotEmpty()) textBuffer.append(' ')
+                textBuffer.append(block.text)
+            } else {
+                flushText()
+                merged += block
+            }
+        }
+        flushText()
+        return merged
+    }
+
+    private fun isSpoilerImage(img: Element): Boolean {
+        val textSignals = listOf(
+            img.attr("alt"),
+            img.attr("title"),
+            img.attr("class"),
+            img.parents().joinToString(" ") { it.className() },
+            img.parents().joinToString(" ") { it.id() }
+        ).joinToString(" ").lowercase()
+
+        return textSignals.contains("spoiler") ||
+            textSignals.contains("스포") ||
+            textSignals.contains("스포일러")
+    }
+
+    private fun sanitizeSpoilerText(raw: String): String {
+        if (raw.isBlank()) return raw
+        var text = raw
+        text = text.replace(Regex("\\[[^\\]]*스포[^\\]]*\\]", RegexOption.IGNORE_CASE), " ")
+        text = text.replace(Regex("\\([^)]*스포[^)]*\\)", RegexOption.IGNORE_CASE), " ")
+        text = text.replace(Regex("스포일러\\s*주의", RegexOption.IGNORE_CASE), " ")
+        text = text.replace(Regex("스포\\s*주의", RegexOption.IGNORE_CASE), " ")
+        text = text.replace(Regex("\\b스포\\b", RegexOption.IGNORE_CASE), " ")
+        return text.replace(Regex("\\s+"), " ").trim()
+    }
+
     fun fetchAllComments(postUrl: String): List<DcComment> {
+        val mobileUrl = toMobilePostUrl(postUrl)
         politeDelay()
-        val doc = Jsoup.connect(postUrl)
-            .userAgent(USER_AGENT)
+        val doc = Jsoup.connect(mobileUrl)
+            .userAgent(MOBILE_USER_AGENT)
             .timeout(TIMEOUT_MS)
             .ignoreHttpErrors(true)
             .get()
 
         val blocks = doc.select(
-            ".comment_box, .comment_row, .reply_list li, .cmt_list li, .comment_wrap li"
+            ".all-comment-lst li.comment, .comment_box, .comment_row, .reply_list li, .cmt_list li, .comment_wrap li"
         )
         val comments = blocks.mapNotNull { block ->
             val text = readCommentText(block)
@@ -221,11 +414,24 @@ class DcRepository {
     }
 
     private fun readWriter(block: Element): String {
-        return block.selectFirst(".nickname, .name, .writer")?.text()?.trim().orEmpty()
+        return block.selectFirst(".nick, .nickname, .name, .writer")?.text()?.trim().orEmpty()
     }
 
     private fun readDate(block: Element): String {
         return block.selectFirst(".fr, .date_time, .date, .time")?.text()?.trim().orEmpty()
+    }
+
+    private fun parseQuery(query: String): Map<String, String> {
+        if (query.isBlank()) return emptyMap()
+        return query.split("&")
+            .mapNotNull { pair ->
+                val idx = pair.indexOf('=')
+                if (idx <= 0) return@mapNotNull null
+                val key = pair.substring(0, idx)
+                val value = pair.substring(idx + 1)
+                key to URLDecoder.decode(value, StandardCharsets.UTF_8.name())
+            }
+            .toMap()
     }
 
     private fun politeDelay() {
@@ -259,7 +465,7 @@ class DcRepository {
 
     companion object {
         private const val TIMEOUT_MS = 10000
-        private const val DETAIL_PREVIEW_LIMIT = 12
+        private const val DETAIL_PREVIEW_LIMIT = 60
         private const val PREVIEW_MAX_CHARS = 140
         private const val USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -269,7 +475,7 @@ class DcRepository {
 
     private data class PostDetailPreview(
         val preview: String,
-        val imageUrl: String?
+        val imageUrls: List<String>
     )
 }
 

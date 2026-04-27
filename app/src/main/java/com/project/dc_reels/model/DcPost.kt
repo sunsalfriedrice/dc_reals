@@ -8,6 +8,7 @@ data class DcPost(
     val recommend: Int,
     val viewCount: Int,
     val preview: String,
-    val imageUrl: String?
+    val imageUrl: String?,
+    val imageUrls: List<String> = emptyList()
 )
 

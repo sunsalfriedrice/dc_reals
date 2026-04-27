@@ -81,13 +81,17 @@ class CommentsActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             showLoading(true)
-            val loaded = withContext(Dispatchers.IO) {
-                runCatching { repository.fetchAllComments(postUrl) }.getOrDefault(emptyList())
+            val result = withContext(Dispatchers.IO) {
+                runCatching { repository.fetchAllComments(postUrl) }
             }
+            val loaded = result.getOrDefault(emptyList())
             allComments.clear()
             allComments.addAll(loaded)
             rebuildFromFirstPage(adapter)
             showLoading(false)
+            if (result.isFailure) {
+                Toast.makeText(this@CommentsActivity, getString(R.string.comment_load_failed), Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
