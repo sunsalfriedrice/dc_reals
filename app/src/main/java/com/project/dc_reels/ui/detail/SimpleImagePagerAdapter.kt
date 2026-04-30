@@ -43,6 +43,7 @@ class SimpleImagePagerAdapter(
                 LazyHeaders.Builder()
                     .addHeader(HEADER_USER_AGENT, USER_AGENT)
                     .addHeader(HEADER_REFERER, REFERER)
+                    .addHeader(HEADER_ACCEPT, ACCEPT_IMAGE)
                     .build()
             )
             Glide.with(imageView)
@@ -60,6 +61,7 @@ class SimpleImagePagerAdapter(
         private const val REFERER = "https://m.dcinside.com/"
         private const val HEADER_USER_AGENT = "User-Agent"
         private const val HEADER_REFERER = "Referer"
+        private const val HEADER_ACCEPT = "Accept"
+        private const val ACCEPT_IMAGE = "image/webp,image/*;q=0.8,*/*;q=0.5"
     }
 }
-

@@ -24,7 +24,7 @@
             android:id="@+id/galleryIdText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="@android:color/darker_gray"
+            android:textColor="?attr/colorOnSurfaceVariant"
             android:textSize="12sp" />
     </LinearLayout>
 
@@ -45,4 +45,3 @@
         android:src="@android:drawable/ic_menu_delete" />
 
 </LinearLayout>
-

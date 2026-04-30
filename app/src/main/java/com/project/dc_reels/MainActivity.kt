@@ -11,13 +11,13 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.GravityCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.drawerlayout.widget.DrawerLayout
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
-import com.google.android.material.bottomsheet.BottomSheetBehavior
-import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.snackbar.Snackbar
 import com.project.dc_reels.data.DcRepository
@@ -27,13 +27,11 @@ import com.project.dc_reels.model.GalleryConfig
 import com.project.dc_reels.ui.GalleryDrawerAdapter
 import com.project.dc_reels.ui.comments.CommentsActivity
 import com.project.dc_reels.ui.detail.ImageViewerActivity
+import com.project.dc_reels.ui.detail.PostContentActivity
 import com.project.dc_reels.ui.detail.PostDetailActivity
-import com.project.dc_reels.ui.detail.PostContentAdapter
-import com.project.dc_reels.ui.detail.SimpleImagePagerAdapter
 import com.project.dc_reels.ui.reels.ReelsPagerAdapter
 import com.project.dc_reels.util.GalleryUrlNormalizer
 import android.content.Intent
-import android.widget.ImageView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -46,6 +44,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var loading: ProgressBar
     private lateinit var emptyText: TextView
     private lateinit var viewPager: ViewPager2
+    private lateinit var mainContent: View
 
     private val galleries = mutableListOf<GalleryConfig>()
 
@@ -57,10 +56,11 @@ class MainActivity : AppCompatActivity() {
         loading = findViewById(R.id.mainLoading)
         emptyText = findViewById(R.id.emptyPostsText)
         viewPager = findViewById(R.id.reelsViewPager)
+        mainContent = findViewById(R.id.mainContent)
 
         val toolbar = findViewById<MaterialToolbar>(R.id.mainToolbar)
         val addButton = findViewById<Button>(R.id.addGalleryButton)
-        val galleryRecycler = findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.galleryRecyclerView)
+        val galleryRecycler = findViewById<RecyclerView>(R.id.galleryRecyclerView)
 
         val reelAdapter = ReelsPagerAdapter(
             onOpenComments = { post ->
@@ -71,7 +71,11 @@ class MainActivity : AppCompatActivity() {
                 startActivity(intent)
             },
             onOpenDetail = { post ->
-                showDetailBottomSheet(post)
+                val intent = Intent(this, PostContentActivity::class.java).apply {
+                    putExtra(PostContentActivity.EXTRA_POST_URL, post.url)
+                    putExtra(PostContentActivity.EXTRA_POST_TITLE, post.title)
+                }
+                startActivity(intent)
             },
             onOpenImages = { post ->
                 openImageViewerFromPost(post)
@@ -82,9 +86,33 @@ class MainActivity : AppCompatActivity() {
                     putExtra(PostDetailActivity.EXTRA_POST_TITLE, post.title)
                 }
                 startActivity(intent)
+            },
+            onRequestPreview = { post, onResult ->
+                lifecycleScope.launch {
+                    val preview = withContext(Dispatchers.IO) {
+                        runCatching { repository.fetchPostPreview(post.url) }.getOrNull()
+                    }
+                    if (preview != null) {
+                        onResult(
+                            post.copy(
+                                preview = preview.preview.ifBlank { post.title },
+                                imageUrl = preview.imageUrls.firstOrNull(),
+                                imageUrls = preview.imageUrls
+                            )
+                        )
+                    }
+                }
             }
         )
         viewPager.adapter = reelAdapter
+        viewPager.offscreenPageLimit = 4
+
+        ViewCompat.setOnApplyWindowInsetsListener(mainContent) { view, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            view.setPadding(systemBars.left, view.paddingTop, systemBars.right, systemBars.bottom)
+            insets
+        }
+        ViewCompat.requestApplyInsets(mainContent)
 
         lateinit var drawerAdapter: GalleryDrawerAdapter
         drawerAdapter = GalleryDrawerAdapter(
@@ -182,6 +210,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadPosts(galleryId: String, reelAdapter: ReelsPagerAdapter) {
         lifecycleScope.launch {
+            reelAdapter.submitList(emptyList())
+            emptyText.visibility = View.GONE
+            viewPager.setCurrentItem(0, false)
             loading.visibility = View.VISIBLE
             val result = withContext(Dispatchers.IO) {
                 runCatching { repository.fetchConceptPosts(galleryId) }
@@ -209,7 +240,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAddGalleryDialog(onSubmit: (String) -> Unit) {
-        val view = LayoutInflater.from(this).inflate(R.layout.dialog_add_gallery, null)
+        val view = LayoutInflater.from(this).inflate(R.layout.dialog_add_gallery, null, false)
         val input = view.findViewById<EditText>(R.id.galleryLinkInput)
         AlertDialog.Builder(this)
             .setTitle(R.string.add_gallery)
@@ -239,72 +270,6 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun showDetailBottomSheet(post: DcPost) {
-        val content = LayoutInflater.from(this).inflate(R.layout.bottom_sheet_post_detail, null)
-        val dialog = BottomSheetDialog(this)
-        dialog.setContentView(content)
-
-        val loadingView = content.findViewById<ProgressBar>(R.id.detailSheetLoading)
-        val titleView = content.findViewById<TextView>(R.id.detailSheetTitle)
-        val contentRecycler = content.findViewById<RecyclerView>(R.id.detailSheetContentRecycler)
-        val openComments = content.findViewById<Button>(R.id.detailSheetCommentsButton)
-        val contentAdapter = PostContentAdapter { clickedUrl ->
-            val allImageUrls = contentAdapterCurrentImageUrls
-            val index = allImageUrls.indexOf(clickedUrl).takeIf { it >= 0 } ?: 0
-            openImageViewer(allImageUrls, index)
-        }
-        contentRecycler.layoutManager = LinearLayoutManager(this)
-        contentRecycler.adapter = contentAdapter
-
-        var contentAdapterCurrentImageUrls: List<String> = emptyList()
-
-        titleView.text = post.title
-        contentAdapter.submitList(emptyList())
-
-        openComments.setOnClickListener {
-            val intent = Intent(this, CommentsActivity::class.java).apply {
-                putExtra(CommentsActivity.EXTRA_POST_URL, post.url)
-                putExtra(CommentsActivity.EXTRA_POST_TITLE, post.title)
-            }
-            startActivity(intent)
-        }
-
-        dialog.setOnShowListener {
-            val bottomSheet = dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
-            bottomSheet?.let {
-                val behavior = BottomSheetBehavior.from(it)
-                behavior.state = BottomSheetBehavior.STATE_EXPANDED
-                behavior.skipCollapsed = false
-                behavior.peekHeight = (resources.displayMetrics.heightPixels * 0.7f).toInt()
-            }
-        }
-        dialog.show()
-
-        lifecycleScope.launch {
-            loadingView.visibility = View.VISIBLE
-            val detail = withContext(Dispatchers.IO) {
-                runCatching { repository.fetchPostDetail(post.url) }.getOrNull()
-            }
-            loadingView.visibility = View.GONE
-            if (detail == null) {
-                contentAdapter.submitList(emptyList())
-                Toast.makeText(this@MainActivity, getString(R.string.post_load_failed), Toast.LENGTH_SHORT).show()
-                return@launch
-            }
-
-            if (detail.title.isNotBlank()) {
-                titleView.text = detail.title
-            }
-
-            val blocks = if (detail.contentBlocks.isNotEmpty()) {
-                detail.contentBlocks
-            } else {
-                listOf(com.project.dc_reels.model.PostContentBlock(type = com.project.dc_reels.model.PostContentBlock.Type.TEXT, text = detail.bodyText.ifBlank { post.preview }))
-            }
-            contentAdapterCurrentImageUrls = blocks.mapNotNull { it.imageUrl }.distinct()
-            contentAdapter.submitList(blocks)
-        }
-    }
 
     private fun openImageViewerFromPost(post: DcPost) {
         val cached = post.imageUrls

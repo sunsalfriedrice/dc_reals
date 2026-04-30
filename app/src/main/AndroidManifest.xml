@@ -24,6 +24,9 @@
             android:name=".ui.detail.PostDetailActivity"
             android:exported="false" />
         <activity
+            android:name=".ui.detail.PostContentActivity"
+            android:exported="false" />
+        <activity
             android:name=".MainActivity"
             android:exported="true">
             <intent-filter>

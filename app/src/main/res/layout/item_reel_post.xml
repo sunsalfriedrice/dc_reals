@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
@@ -50,7 +51,7 @@
                 android:contentDescription="@string/open_original"
                 android:padding="10dp"
                 android:src="@drawable/ic_reels_original"
-                android:tint="@android:color/white" />
+                app:tint="@android:color/white" />
 
             <ImageButton
                 android:id="@+id/openCommentsButton"
@@ -61,7 +62,7 @@
                 android:contentDescription="@string/open_comments"
                 android:padding="10dp"
                 android:src="@drawable/ic_reels_comment"
-                android:tint="@android:color/white" />
+                app:tint="@android:color/white" />
         </LinearLayout>
     </FrameLayout>
 
@@ -71,9 +72,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="10dp"
         android:maxLines="6"
-        android:textColor="@android:color/darker_gray"
+        android:textColor="?attr/colorOnSurfaceVariant"
         android:textSize="16sp" />
 
 </LinearLayout>
-
-

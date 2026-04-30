@@ -5,6 +5,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
@@ -12,6 +13,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.bumptech.glide.Glide
+import com.bumptech.glide.load.model.GlideUrl
+import com.bumptech.glide.load.model.LazyHeaders
 import com.google.android.material.button.MaterialButtonToggleGroup
 import com.project.dc_reels.R
 import com.project.dc_reels.data.CommentPagingSource
@@ -155,12 +159,53 @@ private class CommentsAdapter(
         private val writer = itemView.findViewById<TextView>(R.id.commentWriterText)
         private val date = itemView.findViewById<TextView>(R.id.commentDateText)
         private val body = itemView.findViewById<TextView>(R.id.commentBodyText)
+        private val dcconImage = itemView.findViewById<ImageView>(R.id.commentDcconImage)
 
         fun bind(item: DcComment) {
             writer.text = item.writer
             date.text = item.dateText
             body.text = item.text
+            body.visibility = if (item.text.isBlank()) View.GONE else View.VISIBLE
+
+            val imageUrl = item.imageUrl.orEmpty()
+            if (imageUrl.isBlank()) {
+                dcconImage.visibility = View.GONE
+                dcconImage.setImageDrawable(null)
+            } else {
+                dcconImage.visibility = View.VISIBLE
+                applyDcconSize(dcconImage)
+                val glideUrl = GlideUrl(
+                    imageUrl,
+                    LazyHeaders.Builder()
+                        .addHeader(HEADER_USER_AGENT, USER_AGENT)
+                        .addHeader(HEADER_REFERER, REFERER)
+                        .addHeader(HEADER_ACCEPT, ACCEPT_IMAGE)
+                        .build()
+                )
+                Glide.with(dcconImage)
+                    .load(glideUrl)
+                    .into(dcconImage)
+            }
+        }
+
+        private fun applyDcconSize(imageView: ImageView) {
+            val density = imageView.resources.displayMetrics.density
+            val sizePx = (80f * density).toInt()
+            val params = imageView.layoutParams
+            params.width = sizePx
+            params.height = sizePx
+            imageView.layoutParams = params
+            imageView.scaleType = ImageView.ScaleType.CENTER_INSIDE
         }
     }
-}
 
+    companion object {
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36"
+        private const val REFERER = "https://m.dcinside.com/"
+        private const val HEADER_USER_AGENT = "User-Agent"
+        private const val HEADER_REFERER = "Referer"
+        private const val HEADER_ACCEPT = "Accept"
+        private const val ACCEPT_IMAGE = "image/webp,image/*;q=0.8,*/*;q=0.5"
+    }
+}

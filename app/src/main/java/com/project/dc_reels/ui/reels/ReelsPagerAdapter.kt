@@ -21,15 +21,26 @@ class ReelsPagerAdapter(
     private val onOpenComments: (DcPost) -> Unit,
     private val onOpenDetail: (DcPost) -> Unit,
     private val onOpenImages: (DcPost) -> Unit,
-    private val onOpenOriginal: (DcPost) -> Unit
+    private val onOpenOriginal: (DcPost) -> Unit,
+    private val onRequestPreview: (DcPost, (DcPost) -> Unit) -> Unit
 ) : RecyclerView.Adapter<ReelsPagerAdapter.ReelViewHolder>() {
 
     private val items = mutableListOf<DcPost>()
+    private val requestedPreviewUrls = mutableSetOf<String>()
 
     fun submitList(posts: List<DcPost>) {
         items.clear()
         items.addAll(posts)
+        requestedPreviewUrls.clear()
         notifyDataSetChanged()
+    }
+
+    fun updatePost(updated: DcPost) {
+        val index = items.indexOfFirst { it.url == updated.url }
+        if (index >= 0) {
+            items[index] = updated
+            notifyItemChanged(index)
+        }
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ReelViewHolder {
@@ -59,6 +70,11 @@ class ReelsPagerAdapter(
             if (post.imageUrl.isNullOrBlank()) {
                 imageView.setImageDrawable(null)
                 noImageIcon.visibility = View.VISIBLE
+                if (requestedPreviewUrls.add(post.url)) {
+                    onRequestPreview(post) { updated ->
+                        updatePost(updated)
+                    }
+                }
             } else {
                 noImageIcon.visibility = View.INVISIBLE
                 val glideUrl = GlideUrl(
@@ -66,6 +82,7 @@ class ReelsPagerAdapter(
                     LazyHeaders.Builder()
                         .addHeader(HEADER_USER_AGENT, USER_AGENT)
                         .addHeader(HEADER_REFERER, REFERER)
+                        .addHeader(HEADER_ACCEPT, ACCEPT_IMAGE)
                         .build()
                 )
 
@@ -115,6 +132,7 @@ class ReelsPagerAdapter(
         private const val REFERER = "https://m.dcinside.com/"
         private const val HEADER_USER_AGENT = "User-Agent"
         private const val HEADER_REFERER = "Referer"
+        private const val HEADER_ACCEPT = "Accept"
+        private const val ACCEPT_IMAGE = "image/webp,image/*;q=0.8,*/*;q=0.5"
     }
 }
-

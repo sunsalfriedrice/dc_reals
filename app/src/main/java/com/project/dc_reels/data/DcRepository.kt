@@ -151,7 +151,7 @@ class DcRepository {
             if (index >= DETAIL_PREVIEW_LIMIT) return@mapIndexed post
 
             runCatching {
-                val detail = fetchPostDetailPreview(post.url)
+                val detail = fetchPostPreview(post.url)
                 post.copy(
                     preview = detail.preview.ifBlank { post.title },
                     imageUrl = detail.imageUrls.firstOrNull(),
@@ -161,7 +161,7 @@ class DcRepository {
         }
     }
 
-    private fun fetchPostDetailPreview(postUrl: String): PostDetailPreview {
+    fun fetchPostPreview(postUrl: String): PostPreview {
         val detail = fetchPostDetail(postUrl)
         val preview = detail.bodyText
             ?.replace(Regex("\\s+"), " ")
@@ -169,7 +169,7 @@ class DcRepository {
             ?.take(PREVIEW_MAX_CHARS)
             .orEmpty()
 
-        return PostDetailPreview(
+        return PostPreview(
             preview = preview,
             imageUrls = detail.imageUrls
         )
@@ -186,7 +186,8 @@ class DcRepository {
 
         val body = doc.selectFirst(".thum-txtin, .write_div, .writing_view_box")
         val bodyClone = body?.clone()?.apply {
-            select(".spoiler, [class*=spoiler], [id*=spoiler]").remove()
+            select(".spoiler, [class*=spoiler], [id*=spoiler], [class*=spoil], [id*=spoil]").remove()
+            select("img").filter { img -> isSpoilerImage(img) }.forEach { it.remove() }
         }
         val bodyText = sanitizeSpoilerText(bodyClone?.text()?.trim().orEmpty())
 
@@ -249,20 +250,105 @@ class DcRepository {
         }.getOrNull()
     }
 
+    private fun parseSrcsetUrl(raw: String): String? {
+        if (raw.isBlank()) return null
+        val firstCandidate = raw.split(",").firstOrNull().orEmpty().trim()
+        val url = firstCandidate.split(" ").firstOrNull().orEmpty().trim()
+        return url.ifBlank { null }
+    }
+
+    private fun readImageUrl(element: Element, baseUrl: String): String? {
+        val raw = element.attr("data-original")
+            .ifBlank { element.attr("data-src") }
+            .ifBlank { element.attr("data-srcset") }
+            .ifBlank { element.attr("srcset") }
+            .ifBlank { element.attr("src") }
+        val candidate = parseSrcsetUrl(raw) ?: raw
+        val normalized = normalizeImageUrl(baseUrl, candidate).orEmpty()
+        if (normalized.isBlank()) return null
+        if (normalized.contains("/m_webp.png") || normalized.contains("dccon_loading_nobg")) {
+            return null
+        }
+        if (normalized.contains("gallview_loading_ori.gif") || normalized.contains("dccon_loading")) {
+            return null
+        }
+        return normalized
+    }
+
+    private fun normalizeVideoUrl(raw: String): String? {
+        val cleaned = raw.trim()
+        if (cleaned.isBlank()) return null
+        val resolved = when {
+            cleaned.startsWith("//") -> "https:$cleaned"
+            cleaned.startsWith("http://") || cleaned.startsWith("https://") -> cleaned
+            else -> return null
+        }
+
+        val uri = runCatching { URI(resolved) }.getOrNull() ?: return resolved
+        val host = uri.host?.lowercase().orEmpty()
+        val path = uri.path.orEmpty()
+        val query = uri.rawQuery.orEmpty()
+        val params = parseQuery(query)
+
+        if (host.contains("gall.dcinside.com") && path.contains("/board/movie/movie_view")) {
+            val no = params["no"].orEmpty()
+            if (no.isNotBlank()) {
+                return "https://m.dcinside.com/movie/player?no=$no&mobile=M&is_copy=1"
+            }
+        }
+
+        val youtubeId = when {
+            host.contains("youtu.be") -> path.trim('/').ifBlank { null }
+            host.contains("youtube.com") || host.contains("m.youtube.com") -> when {
+                path.startsWith("/watch") -> params["v"]
+                path.startsWith("/embed/") -> path.removePrefix("/embed/").trim('/').ifBlank { null }
+                path.startsWith("/shorts/") -> path.removePrefix("/shorts/").trim('/').ifBlank { null }
+                else -> null
+            }
+            else -> null
+        }
+
+        if (!youtubeId.isNullOrBlank()) {
+            return "https://www.youtube.com/embed/$youtubeId"
+        }
+
+        return resolved
+    }
+
+    private fun readEmbeddedVideoUrl(element: Element): String? {
+        val attrs = listOf(
+            element.attr("data-src"),
+            element.attr("data-ytid"),
+            element.attr("data-youtube"),
+            element.attr("data-video"),
+            element.attr("data-vid"),
+            element.attr("data-embed")
+        ).firstOrNull { it.isNotBlank() }.orEmpty()
+        if (attrs.isNotBlank()) {
+            return normalizeVideoUrl(attrs)
+        }
+        return null
+    }
+
+    private fun isVideoLink(raw: String): Boolean {
+        val url = raw.lowercase()
+        return url.contains("youtube.com") ||
+            url.contains("youtu.be") ||
+            url.contains("/shorts/") ||
+            url.endsWith(".mp4") ||
+            url.contains(".mp4?") ||
+            url.endsWith(".webm") ||
+            url.contains(".webm?") ||
+            url.endsWith(".m3u8") ||
+            url.contains(".m3u8?")
+    }
+
     private fun extractImageUrls(body: Element?, doc: Document, baseUrl: String): List<String> {
         if (body == null) return emptyList()
-        val urls = body.select("img[data-original], img[src]")
-            .mapNotNull { img ->
-                if (isSpoilerImage(img)) return@mapNotNull null
-                val raw = img.attr("data-original")
-                    .ifBlank { img.attr("data-src") }
-                    .ifBlank { img.attr("src") }
-                val normalized = normalizeImageUrl(baseUrl, raw).orEmpty()
-                if (normalized.isBlank()) return@mapNotNull null
-                if (normalized.contains("gallview_loading_ori.gif") || normalized.contains("dccon_loading")) {
-                    return@mapNotNull null
-                }
-                normalized
+        val urls = body.select("img[data-original], img[src], img[srcset], img[data-srcset], source[srcset], source[data-srcset]")
+            .mapNotNull { element ->
+                if (isSpoilerImage(element)) return@mapNotNull null
+                readImageUrl(element, baseUrl)
             }
 
         if (urls.isNotEmpty()) return urls.distinct()
@@ -285,7 +371,7 @@ class DcRepository {
     private fun collectContentBlocks(node: Node, baseUrl: String, out: MutableList<PostContentBlock>) {
         when (node) {
             is TextNode -> {
-                val text = sanitizeSpoilerText(node.text().trim())
+                val text = sanitizeSpoilerText(node.wholeText)
                 if (text.isNotBlank()) {
                     out += PostContentBlock(type = PostContentBlock.Type.TEXT, text = text)
                 }
@@ -294,23 +380,79 @@ class DcRepository {
             is Element -> {
                 val classInfo = node.className().lowercase()
                 val idInfo = node.id().lowercase()
-                if (classInfo.contains("spoiler") || idInfo.contains("spoiler")) {
+                if (
+                    classInfo.contains("spoiler") ||
+                    classInfo.contains("spoil") ||
+                    idInfo.contains("spoiler") ||
+                    idInfo.contains("spoil")
+                ) {
                     return
                 }
 
-                if (node.normalName() == "img") {
-                    if (isSpoilerImage(node)) return
-                    val raw = node.attr("data-original")
-                        .ifBlank { node.attr("data-src") }
-                        .ifBlank { node.attr("src") }
-                    val normalized = normalizeImageUrl(baseUrl, raw).orEmpty()
-                    if (
-                        normalized.isBlank() ||
-                        normalized.contains("gallview_loading_ori.gif") ||
-                        normalized.contains("dccon_loading")
-                    ) {
+                val tag = node.normalName()
+                if (tag == "br") {
+                    out += PostContentBlock(type = PostContentBlock.Type.TEXT, text = "\n")
+                    return
+                }
+
+                if (tag == "picture") {
+                    val source = node.selectFirst("source[srcset], source[data-srcset], img[src], img[srcset], img[data-srcset]")
+                    if (source != null) {
+                        val normalized = readImageUrl(source, baseUrl).orEmpty()
+                        if (normalized.isNotBlank()) {
+                            out += PostContentBlock(type = PostContentBlock.Type.IMAGE, imageUrl = normalized)
+                            return
+                        }
+                    }
+                }
+
+                if (tag == "iframe") {
+                    val raw = node.attr("src").ifBlank { node.attr("data-src") }
+                    val normalized = normalizeVideoUrl(raw).orEmpty()
+                    if (normalized.isNotBlank()) {
+                        out += PostContentBlock(type = PostContentBlock.Type.VIDEO, videoUrl = normalized)
                         return
                     }
+                }
+
+                if (tag == "video") {
+                    val raw = node.attr("src").ifBlank {
+                        node.selectFirst("source[src], source[data-src]")?.attr("data-src")
+                            ?.ifBlank { node.selectFirst("source[src]")?.attr("src") }.orEmpty()
+                    }
+                    val normalized = normalizeVideoUrl(raw).orEmpty()
+                    if (normalized.isNotBlank()) {
+                        out += PostContentBlock(type = PostContentBlock.Type.VIDEO, videoUrl = normalized)
+                        return
+                    }
+                }
+
+                if (tag == "a") {
+                    val raw = node.attr("href")
+                    if (raw.isNotBlank() && isVideoLink(raw)) {
+                        val normalized = normalizeVideoUrl(raw).orEmpty()
+                        if (normalized.isNotBlank()) {
+                            out += PostContentBlock(type = PostContentBlock.Type.VIDEO, videoUrl = normalized)
+                        }
+                    }
+                }
+
+                val embeddedVideoUrl = readEmbeddedVideoUrl(node)
+                if (embeddedVideoUrl != null) {
+                    val hasInlineMedia = node.selectFirst("iframe, video") != null
+                    if (!hasInlineMedia) {
+                        out += PostContentBlock(type = PostContentBlock.Type.VIDEO, videoUrl = embeddedVideoUrl)
+                    }
+                }
+
+                if (tag == "source") {
+                    return
+                }
+
+                if (tag == "img") {
+                    if (isSpoilerImage(node)) return
+                    val normalized = readImageUrl(node, baseUrl).orEmpty()
+                    if (normalized.isBlank()) return
                     out += PostContentBlock(type = PostContentBlock.Type.IMAGE, imageUrl = normalized)
                     return
                 }
@@ -319,10 +461,8 @@ class DcRepository {
                     collectContentBlocks(child, baseUrl, out)
                 }
 
-                if (node.normalName() == "p" || node.normalName() == "div") {
-                    if (out.lastOrNull()?.type == PostContentBlock.Type.TEXT) {
-                        out += PostContentBlock(type = PostContentBlock.Type.TEXT, text = "\n")
-                    }
+                if (tag in BLOCK_BREAK_TAGS) {
+                    out += PostContentBlock(type = PostContentBlock.Type.TEXT, text = "\n\n")
                 }
             }
         }
@@ -334,8 +474,13 @@ class DcRepository {
         val textBuffer = StringBuilder()
 
         fun flushText() {
-            val text = textBuffer.toString().replace(Regex("\\n{3,}"), "\n\n").trim()
-            if (text.isNotBlank()) {
+            var text = textBuffer.toString()
+            text = text.replace('\u00A0', ' ')
+            text = text.replace(Regex("[\\t\\x0B\\f\\r ]+"), " ")
+            text = text.replace(Regex(" *\\n+ *"), "\n")
+            text = text.replace(Regex("\\n{3,}"), "\n\n")
+            val hasVisible = text.any { it != ' ' && it != '\n' }
+            if (hasVisible) {
                 merged += PostContentBlock(type = PostContentBlock.Type.TEXT, text = text)
             }
             textBuffer.clear()
@@ -343,7 +488,6 @@ class DcRepository {
 
         blocks.forEach { block ->
             if (block.type == PostContentBlock.Type.TEXT) {
-                if (textBuffer.isNotEmpty()) textBuffer.append(' ')
                 textBuffer.append(block.text)
             } else {
                 flushText()
@@ -355,17 +499,30 @@ class DcRepository {
     }
 
     private fun isSpoilerImage(img: Element): Boolean {
-        val textSignals = listOf(
+        val structuralSignals = listOf(
             img.attr("alt"),
             img.attr("title"),
             img.attr("class"),
+            img.attr("id"),
             img.parents().joinToString(" ") { it.className() },
-            img.parents().joinToString(" ") { it.id() }
+            img.parents().joinToString(" ") { it.id() },
+            img.parents().joinToString(" ") { it.attr("data-type") },
+            img.parents().joinToString(" ") { it.text() }
         ).joinToString(" ").lowercase()
 
-        return textSignals.contains("spoiler") ||
-            textSignals.contains("스포") ||
-            textSignals.contains("스포일러")
+        val urlSignals = listOf(
+            img.attr("src"),
+            img.attr("data-src"),
+            img.attr("data-original")
+        ).joinToString(" ").lowercase()
+
+        return structuralSignals.contains("spoiler") ||
+            structuralSignals.contains("spoil") ||
+            structuralSignals.contains("스포") ||
+            structuralSignals.contains("스포일러") ||
+            urlSignals.contains("spoiler") ||
+            urlSignals.contains("spoil") ||
+            urlSignals.contains("스포")
     }
 
     private fun sanitizeSpoilerText(raw: String): String {
@@ -392,11 +549,17 @@ class DcRepository {
             ".all-comment-lst li.comment, .comment_box, .comment_row, .reply_list li, .cmt_list li, .comment_wrap li"
         )
         val comments = blocks.mapNotNull { block ->
-            val text = readCommentText(block)
-            if (text.isBlank()) return@mapNotNull null
             val writer = readWriter(block)
             val date = readDate(block)
-            DcComment(writer = writer.ifBlank { "익명" }, text = text, dateText = date)
+            val text = sanitizeCommentBody(writer, readCommentText(block))
+            val imageUrl = readCommentImageUrl(block, mobileUrl)
+            if (text.isBlank() && imageUrl.isNullOrBlank()) return@mapNotNull null
+            DcComment(
+                writer = writer.ifBlank { "익명" },
+                text = text,
+                dateText = date,
+                imageUrl = imageUrl
+            )
         }
 
         return comments.distinctBy { "${it.writer}|${it.text}|${it.dateText}" }
@@ -411,6 +574,31 @@ class DcRepository {
             return fallback
         }
         return ""
+    }
+
+    private fun sanitizeCommentBody(writer: String, raw: String): String {
+        if (raw.isBlank()) return raw
+        if (writer.isBlank()) return raw.trim()
+        val escaped = Regex.escape(writer.trim())
+        val normalized = raw.trim()
+        if (normalized == writer.trim()) return ""
+        val withColon = Regex("^${escaped}\\s*[:：]\\s*")
+        return normalized.replace(withColon, "").trim()
+    }
+
+    private fun readCommentImageUrl(block: Element, baseUrl: String): String? {
+        val img = block.selectFirst(
+            "img.dccon, img[class*=dccon], img[alt*=디시콘], img[data-type*=dccon], img"
+        ) ?: return null
+        val raw = img.attr("data-original")
+            .ifBlank { img.attr("data-src") }
+            .ifBlank { img.attr("srcset") }
+            .ifBlank { img.attr("src") }
+        val src = parseSrcsetUrl(raw).orEmpty().ifBlank { raw }
+        val normalized = normalizeImageUrl(baseUrl, src).orEmpty()
+        if (normalized.isBlank()) return null
+        if (normalized.contains("dccon_loading")) return null
+        return normalized
     }
 
     private fun readWriter(block: Element): String {
@@ -465,17 +653,19 @@ class DcRepository {
 
     companion object {
         private const val TIMEOUT_MS = 10000
-        private const val DETAIL_PREVIEW_LIMIT = 60
+        private const val DETAIL_PREVIEW_LIMIT = 4
         private const val PREVIEW_MAX_CHARS = 140
         private const val USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         private const val MOBILE_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36"
+        private val BLOCK_BREAK_TAGS = setOf(
+            "p", "div", "li", "blockquote", "section", "article", "h1", "h2", "h3", "h4", "h5", "h6"
+        )
     }
 
-    private data class PostDetailPreview(
+    data class PostPreview(
         val preview: String,
         val imageUrls: List<String>
     )
 }
-

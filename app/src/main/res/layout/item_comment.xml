@@ -21,7 +21,7 @@
             android:id="@+id/commentDateText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="@android:color/darker_gray"
+            android:textColor="?attr/colorOnSurfaceVariant"
             android:textSize="12sp" />
     </LinearLayout>
 
@@ -31,5 +31,13 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp" />
 
-</LinearLayout>
+    <ImageView
+        android:id="@+id/commentDcconImage"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:adjustViewBounds="true"
+        android:contentDescription="@string/post_image"
+        android:visibility="gone" />
 
+</LinearLayout>
