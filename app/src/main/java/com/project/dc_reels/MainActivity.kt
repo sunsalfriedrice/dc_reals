@@ -24,11 +24,13 @@ import com.project.dc_reels.data.DcRepository
 import com.project.dc_reels.data.GalleryStore
 import com.project.dc_reels.model.DcPost
 import com.project.dc_reels.model.GalleryConfig
+import com.project.dc_reels.model.PostContentBlock
 import com.project.dc_reels.ui.GalleryDrawerAdapter
 import com.project.dc_reels.ui.comments.CommentsActivity
 import com.project.dc_reels.ui.detail.ImageViewerActivity
 import com.project.dc_reels.ui.detail.PostContentActivity
 import com.project.dc_reels.ui.detail.PostDetailActivity
+import com.project.dc_reels.ui.detail.ViewerMediaItem
 import com.project.dc_reels.ui.reels.ReelsPagerAdapter
 import com.project.dc_reels.util.GalleryUrlNormalizer
 import android.content.Intent
@@ -42,11 +44,26 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var drawerLayout: DrawerLayout
     private lateinit var loading: ProgressBar
+    private lateinit var pagingLoading: ProgressBar
     private lateinit var emptyText: TextView
     private lateinit var viewPager: ViewPager2
     private lateinit var mainContent: View
+    private lateinit var reelAdapter: ReelsPagerAdapter
 
     private val galleries = mutableListOf<GalleryConfig>()
+    private var currentGalleryId: String? = null
+    private var currentPage = 1
+    private var isLoadingPage = false
+    private var hasMorePages = true
+    private var lastPageUrls: Set<String> = emptySet()
+    private var consecutiveLoadFailures = 0
+    private var repeatPageCount = 0
+
+    private val pageChangeCallback = object : ViewPager2.OnPageChangeCallback() {
+        override fun onPageSelected(position: Int) {
+            maybeLoadNextPage(position)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,6 +71,7 @@ class MainActivity : AppCompatActivity() {
 
         drawerLayout = findViewById(R.id.drawerLayout)
         loading = findViewById(R.id.mainLoading)
+        pagingLoading = findViewById(R.id.pagingLoading)
         emptyText = findViewById(R.id.emptyPostsText)
         viewPager = findViewById(R.id.reelsViewPager)
         mainContent = findViewById(R.id.mainContent)
@@ -62,7 +80,7 @@ class MainActivity : AppCompatActivity() {
         val addButton = findViewById<Button>(R.id.addGalleryButton)
         val galleryRecycler = findViewById<RecyclerView>(R.id.galleryRecyclerView)
 
-        val reelAdapter = ReelsPagerAdapter(
+        reelAdapter = ReelsPagerAdapter(
             onOpenComments = { post ->
                 val intent = Intent(this, CommentsActivity::class.java).apply {
                     putExtra(CommentsActivity.EXTRA_POST_URL, post.url)
@@ -106,6 +124,7 @@ class MainActivity : AppCompatActivity() {
         )
         viewPager.adapter = reelAdapter
         viewPager.offscreenPageLimit = 4
+        viewPager.registerOnPageChangeCallback(pageChangeCallback)
 
         ViewCompat.setOnApplyWindowInsetsListener(mainContent) { view, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -170,6 +189,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onDestroy() {
+        viewPager.unregisterOnPageChangeCallback(pageChangeCallback)
+        super.onDestroy()
+    }
+
     private fun addGalleryFromLink(
         link: String,
         drawerAdapter: GalleryDrawerAdapter,
@@ -209,32 +233,107 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadPosts(galleryId: String, reelAdapter: ReelsPagerAdapter) {
+        currentGalleryId = galleryId
+        currentPage = 1
+        hasMorePages = true
+        lastPageUrls = emptySet()
+        consecutiveLoadFailures = 0
+        repeatPageCount = 0
+        loadPostsPage(galleryId, 1, reelAdapter, reset = true)
+    }
+
+    private fun maybeLoadNextPage(position: Int) {
+        val total = reelAdapter.itemCount
+        if (!hasMorePages || isLoadingPage || total == 0) return
+        if (position >= total - PREFETCH_THRESHOLD) {
+            loadNextPage()
+        }
+    }
+
+    private fun loadNextPage() {
+        val galleryId = currentGalleryId ?: return
+        loadPostsPage(galleryId, currentPage + 1, reelAdapter, reset = false)
+    }
+
+    private fun loadPostsPage(
+        galleryId: String,
+        page: Int,
+        reelAdapter: ReelsPagerAdapter,
+        reset: Boolean
+    ) {
+        if (isLoadingPage) return
+        isLoadingPage = true
+
         lifecycleScope.launch {
-            reelAdapter.submitList(emptyList())
-            emptyText.visibility = View.GONE
-            viewPager.setCurrentItem(0, false)
-            loading.visibility = View.VISIBLE
-            val result = withContext(Dispatchers.IO) {
-                runCatching { repository.fetchConceptPosts(galleryId) }
+            if (reset) {
+                reelAdapter.submitList(emptyList())
+                emptyText.visibility = View.GONE
+                viewPager.setCurrentItem(0, false)
+                loading.visibility = View.VISIBLE
+                pagingLoading.visibility = View.GONE
+            } else {
+                pagingLoading.visibility = View.VISIBLE
             }
-            loading.visibility = View.GONE
+
+            val result = withContext(Dispatchers.IO) {
+                runCatching { repository.fetchConceptPosts(galleryId, page) }
+            }
+
+            if (reset) {
+                loading.visibility = View.GONE
+            }
+            pagingLoading.visibility = View.GONE
+            isLoadingPage = false
 
             val posts = result.getOrDefault(emptyList())
-            reelAdapter.submitList(posts)
-            emptyText.visibility = if (posts.isEmpty()) View.VISIBLE else View.GONE
+            val addedCount = if (reset) {
+                reelAdapter.submitList(posts)
+                posts.size
+            } else {
+                reelAdapter.appendList(posts)
+            }
 
             if (result.isFailure) {
+                consecutiveLoadFailures += 1
                 Toast.makeText(
                     this@MainActivity,
                     getString(R.string.post_load_failed),
                     Toast.LENGTH_SHORT
                 ).show()
-            } else if (posts.isEmpty()) {
-                Toast.makeText(
-                    this@MainActivity,
-                    getString(R.string.post_empty_for_gallery),
-                    Toast.LENGTH_SHORT
-                ).show()
+                if (consecutiveLoadFailures >= 2 && !reset) {
+                    hasMorePages = false
+                }
+                if (reset) {
+                    emptyText.visibility = if (posts.isEmpty()) View.VISIBLE else View.GONE
+                }
+                return@launch
+            }
+
+            consecutiveLoadFailures = 0
+            val pageUrls = posts.mapNotNull { it.url.ifBlank { null } }.toSet()
+            val isRepeatPage = pageUrls.isNotEmpty() && pageUrls == lastPageUrls
+            val isPotentialEnd = posts.isEmpty() || addedCount == 0 || isRepeatPage
+
+            if (isPotentialEnd) {
+                repeatPageCount += 1
+                if (repeatPageCount >= 2) {
+                    hasMorePages = false
+                }
+            } else {
+                repeatPageCount = 0
+                currentPage = page
+                lastPageUrls = pageUrls
+            }
+
+            if (reset) {
+                emptyText.visibility = if (posts.isEmpty()) View.VISIBLE else View.GONE
+                if (posts.isEmpty()) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        getString(R.string.post_empty_for_gallery),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
             }
         }
     }
@@ -272,12 +371,6 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun openImageViewerFromPost(post: DcPost) {
-        val cached = post.imageUrls
-        if (cached.isNotEmpty()) {
-            openImageViewer(cached, 0)
-            return
-        }
-
         lifecycleScope.launch {
             loading.visibility = View.VISIBLE
             val detail = withContext(Dispatchers.IO) {
@@ -285,20 +378,50 @@ class MainActivity : AppCompatActivity() {
             }
             loading.visibility = View.GONE
 
-            val images = detail?.imageUrls.orEmpty()
+            val mediaItems = detail?.contentBlocks
+                ?.mapNotNull { block ->
+                    when (block.type) {
+                        PostContentBlock.Type.IMAGE -> block.imageUrl?.takeIf { it.isNotBlank() }
+                            ?.let { ViewerMediaItem(ViewerMediaItem.Type.IMAGE, it) }
+                        PostContentBlock.Type.VIDEO -> block.videoUrl?.takeIf { it.isNotBlank() }
+                            ?.let { ViewerMediaItem(ViewerMediaItem.Type.VIDEO, it) }
+                        else -> null
+                    }
+                }
+                .orEmpty()
+
+            if (mediaItems.isNotEmpty()) {
+                openImageViewer(mediaItems, 0, post.url)
+                return@launch
+            }
+
+            val images = post.imageUrls
             if (images.isEmpty()) {
                 Toast.makeText(this@MainActivity, getString(R.string.no_image), Toast.LENGTH_SHORT).show()
                 return@launch
             }
-            openImageViewer(images, 0)
+            val fallbackItems = images.map { ViewerMediaItem(ViewerMediaItem.Type.IMAGE, it) }
+            openImageViewer(fallbackItems, 0, post.url)
         }
     }
 
-    private fun openImageViewer(imageUrls: List<String>, startIndex: Int) {
+    private fun openImageViewer(mediaItems: List<ViewerMediaItem>, startIndex: Int, refererUrl: String) {
         val intent = Intent(this, ImageViewerActivity::class.java).apply {
-            putStringArrayListExtra(ImageViewerActivity.EXTRA_IMAGE_URLS, ArrayList(imageUrls))
+            putStringArrayListExtra(
+                ImageViewerActivity.EXTRA_MEDIA_URLS,
+                ArrayList(mediaItems.map { it.url })
+            )
+            putStringArrayListExtra(
+                ImageViewerActivity.EXTRA_MEDIA_TYPES,
+                ArrayList(mediaItems.map { it.type.name.lowercase() })
+            )
+            putExtra(ImageViewerActivity.EXTRA_REFERER_URL, refererUrl)
             putExtra(ImageViewerActivity.EXTRA_START_INDEX, startIndex)
         }
         startActivity(intent)
+    }
+
+    companion object {
+        private const val PREFETCH_THRESHOLD = 2
     }
 }

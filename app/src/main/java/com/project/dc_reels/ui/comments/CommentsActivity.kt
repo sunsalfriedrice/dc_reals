@@ -182,9 +182,13 @@ private class CommentsAdapter(
                         .addHeader(HEADER_ACCEPT, ACCEPT_IMAGE)
                         .build()
                 )
-                Glide.with(dcconImage)
-                    .load(glideUrl)
-                    .into(dcconImage)
+                val requestManager = Glide.with(dcconImage)
+                val request = if (item.isGif || isGifUrl(imageUrl)) {
+                    requestManager.asGif().load(glideUrl)
+                } else {
+                    requestManager.load(glideUrl)
+                }
+                request.into(dcconImage)
             }
         }
 
@@ -197,6 +201,14 @@ private class CommentsAdapter(
             imageView.layoutParams = params
             imageView.scaleType = ImageView.ScaleType.CENTER_INSIDE
         }
+
+        private fun isGifUrl(url: String): Boolean {
+            val normalized = url.lowercase()
+            return normalized.contains(".gif") ||
+                normalized.contains("type=gif") ||
+                normalized.contains("format=gif") ||
+                normalized.contains("gif=1")
+        }
     }
 
     companion object {
@@ -206,6 +218,6 @@ private class CommentsAdapter(
         private const val HEADER_USER_AGENT = "User-Agent"
         private const val HEADER_REFERER = "Referer"
         private const val HEADER_ACCEPT = "Accept"
-        private const val ACCEPT_IMAGE = "image/webp,image/*;q=0.8,*/*;q=0.5"
+        private const val ACCEPT_IMAGE = "image/gif,image/webp,image/*;q=0.8,*/*;q=0.5"
     }
 }

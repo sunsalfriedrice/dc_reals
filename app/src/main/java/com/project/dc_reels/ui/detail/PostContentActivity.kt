@@ -29,7 +29,7 @@ class PostContentActivity : AppCompatActivity() {
     private lateinit var recycler: RecyclerView
     private lateinit var commentsButton: Button
 
-    private var imageUrls: List<String> = emptyList()
+    private var viewerItems: List<ViewerMediaItem> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -55,9 +55,10 @@ class PostContentActivity : AppCompatActivity() {
         }
 
         val contentAdapter = PostContentAdapter(url) { clickedUrl ->
-            val allImageUrls = imageUrls
-            val index = allImageUrls.indexOf(clickedUrl).takeIf { it >= 0 } ?: 0
-            openImageViewer(allImageUrls, index)
+            val index = viewerItems.indexOfFirst {
+                it.type == ViewerMediaItem.Type.IMAGE && it.url == clickedUrl
+            }.takeIf { it >= 0 } ?: 0
+            openImageViewer(viewerItems, index, url)
         }
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = contentAdapter
@@ -105,15 +106,31 @@ class PostContentActivity : AppCompatActivity() {
                     )
                 )
             }
-            imageUrls = blocks.mapNotNull { it.imageUrl }.distinct()
+            viewerItems = blocks.mapNotNull { block ->
+                when (block.type) {
+                    PostContentBlock.Type.IMAGE -> block.imageUrl?.takeIf { it.isNotBlank() }
+                        ?.let { ViewerMediaItem(ViewerMediaItem.Type.IMAGE, it) }
+                    PostContentBlock.Type.VIDEO -> block.videoUrl?.takeIf { it.isNotBlank() }
+                        ?.let { ViewerMediaItem(ViewerMediaItem.Type.VIDEO, it) }
+                    else -> null
+                }
+            }
             contentAdapter.submitList(blocks)
         }
     }
 
-    private fun openImageViewer(imageUrls: List<String>, startIndex: Int) {
-        if (imageUrls.isEmpty()) return
+    private fun openImageViewer(mediaItems: List<ViewerMediaItem>, startIndex: Int, refererUrl: String) {
+        if (mediaItems.isEmpty()) return
         val intent = Intent(this, ImageViewerActivity::class.java).apply {
-            putStringArrayListExtra(ImageViewerActivity.EXTRA_IMAGE_URLS, ArrayList(imageUrls))
+            putStringArrayListExtra(
+                ImageViewerActivity.EXTRA_MEDIA_URLS,
+                ArrayList(mediaItems.map { it.url })
+            )
+            putStringArrayListExtra(
+                ImageViewerActivity.EXTRA_MEDIA_TYPES,
+                ArrayList(mediaItems.map { it.type.name.lowercase() })
+            )
+            putExtra(ImageViewerActivity.EXTRA_REFERER_URL, refererUrl)
             putExtra(ImageViewerActivity.EXTRA_START_INDEX, startIndex)
         }
         startActivity(intent)

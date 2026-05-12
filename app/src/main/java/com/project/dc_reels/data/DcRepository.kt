@@ -42,9 +42,13 @@ class DcRepository {
     }
 
     fun fetchConceptPosts(galleryId: String): List<DcPost> {
+        return fetchConceptPosts(galleryId, 1)
+    }
+
+    fun fetchConceptPosts(galleryId: String, page: Int): List<DcPost> {
         // DC concept feed is most stable on mobile endpoint with recommend=1.
         politeDelay()
-        val mobileDoc = Jsoup.connect(mobileConceptListUrl(galleryId))
+        val mobileDoc = Jsoup.connect(mobileConceptListUrl(galleryId, page))
             .userAgent(MOBILE_USER_AGENT)
             .timeout(TIMEOUT_MS)
             .get()
@@ -55,7 +59,7 @@ class DcRepository {
 
         // Fallback to PC list only when mobile parsing fails.
         politeDelay()
-        val pcDoc = Jsoup.connect(listUrl(galleryId))
+        val pcDoc = Jsoup.connect(listUrl(galleryId, page))
             .userAgent(USER_AGENT)
             .timeout(TIMEOUT_MS)
             .get()
@@ -348,6 +352,9 @@ class DcRepository {
         val urls = body.select("img[data-original], img[src], img[srcset], img[data-srcset], source[srcset], source[data-srcset]")
             .mapNotNull { element ->
                 if (isSpoilerImage(element)) return@mapNotNull null
+                if (element.normalName() == "source" && !isImageSource(element)) {
+                    return@mapNotNull null
+                }
                 readImageUrl(element, baseUrl)
             }
 
@@ -398,10 +405,12 @@ class DcRepository {
                 if (tag == "picture") {
                     val source = node.selectFirst("source[srcset], source[data-srcset], img[src], img[srcset], img[data-srcset]")
                     if (source != null) {
-                        val normalized = readImageUrl(source, baseUrl).orEmpty()
-                        if (normalized.isNotBlank()) {
-                            out += PostContentBlock(type = PostContentBlock.Type.IMAGE, imageUrl = normalized)
-                            return
+                        if (source.normalName() != "source" || isImageSource(source)) {
+                            val normalized = readImageUrl(source, baseUrl).orEmpty()
+                            if (normalized.isNotBlank()) {
+                                out += PostContentBlock(type = PostContentBlock.Type.IMAGE, imageUrl = normalized)
+                                return
+                            }
                         }
                     }
                 }
@@ -498,6 +507,29 @@ class DcRepository {
         return merged
     }
 
+    private fun isImageSource(element: Element): Boolean {
+        val type = element.attr("type").lowercase().trim()
+        if (type.startsWith("image/")) return true
+        val raw = element.attr("data-srcset")
+            .ifBlank { element.attr("srcset") }
+            .ifBlank { element.attr("src") }
+        return isLikelyImageUrl(raw)
+    }
+
+    private fun isLikelyImageUrl(raw: String): Boolean {
+        val cleaned = raw.trim().lowercase()
+        if (cleaned.startsWith("data:image/")) return true
+        val url = parseSrcsetUrl(cleaned).orEmpty().ifBlank { cleaned }
+        val path = url.substringBefore('?').substringBefore('#')
+        return path.endsWith(".jpg") ||
+            path.endsWith(".jpeg") ||
+            path.endsWith(".png") ||
+            path.endsWith(".gif") ||
+            path.endsWith(".webp") ||
+            path.endsWith(".bmp") ||
+            path.endsWith(".svg")
+    }
+
     private fun isSpoilerImage(img: Element): Boolean {
         val structuralSignals = listOf(
             img.attr("alt"),
@@ -551,14 +583,15 @@ class DcRepository {
         val comments = blocks.mapNotNull { block ->
             val writer = readWriter(block)
             val date = readDate(block)
-            val text = sanitizeCommentBody(writer, readCommentText(block))
-            val imageUrl = readCommentImageUrl(block, mobileUrl)
-            if (text.isBlank() && imageUrl.isNullOrBlank()) return@mapNotNull null
+            val text = sanitizeCommentBody(writer, date, readCommentText(block))
+            val imageInfo = readCommentImageInfo(block, mobileUrl)
+            if (text.isBlank() && imageInfo == null) return@mapNotNull null
             DcComment(
                 writer = writer.ifBlank { "익명" },
                 text = text,
                 dateText = date,
-                imageUrl = imageUrl
+                imageUrl = imageInfo?.url,
+                isGif = imageInfo?.isGif == true
             )
         }
 
@@ -576,30 +609,63 @@ class DcRepository {
         return ""
     }
 
-    private fun sanitizeCommentBody(writer: String, raw: String): String {
+    private fun sanitizeCommentBody(writer: String, dateText: String, raw: String): String {
         if (raw.isBlank()) return raw
-        if (writer.isBlank()) return raw.trim()
-        val escaped = Regex.escape(writer.trim())
         val normalized = raw.trim()
-        if (normalized == writer.trim()) return ""
-        val withColon = Regex("^${escaped}\\s*[:：]\\s*")
-        return normalized.replace(withColon, "").trim()
+        if (normalized.isBlank()) return ""
+
+        var result = normalized
+        val writerTrimmed = writer.trim()
+        if (writerTrimmed.isNotBlank()) {
+            val escaped = Regex.escape(writerTrimmed)
+            if (result == writerTrimmed) return ""
+            val withColon = Regex("^${escaped}\\s*[:：]\\s*")
+            result = result.replace(withColon, "").trim()
+            result = result.replace(Regex("^${escaped}\\s+"), "").trim()
+        }
+
+        val dateTrimmed = dateText.trim()
+        if (dateTrimmed.isNotBlank()) {
+            val escapedDate = Regex.escape(dateTrimmed)
+            result = result.replace(Regex("^${escapedDate}\\s+"), "").trim()
+            result = result.replace(Regex("\\s+${escapedDate}$"), "").trim()
+        }
+
+        // Remove common timestamp patterns that leak into comment bodies.
+        result = result.replace(
+            Regex("\\b(20\\d{2}[./-]\\d{1,2}[./-]\\d{1,2})(\\s+\\d{1,2}:\\d{2}(:\\d{2})?)?\\b"),
+            ""
+        ).trim()
+        result = result.replace(
+            Regex("\\b\\d{1,2}[./-]\\d{1,2}\\s+\\d{1,2}:\\d{2}(:\\d{2})?\\b"),
+            ""
+        ).trim()
+
+        return result
     }
 
-    private fun readCommentImageUrl(block: Element, baseUrl: String): String? {
+    private fun readCommentImageInfo(block: Element, baseUrl: String): CommentImage? {
         val img = block.selectFirst(
             "img.dccon, img[class*=dccon], img[alt*=디시콘], img[data-type*=dccon], img"
         ) ?: return null
-        val raw = img.attr("data-original")
+        val rawGif = img.attr("data-gif")
+        val raw = rawGif
+            .ifBlank { img.attr("data-original") }
             .ifBlank { img.attr("data-src") }
+            .ifBlank { img.attr("data-srcset") }
             .ifBlank { img.attr("srcset") }
             .ifBlank { img.attr("src") }
         val src = parseSrcsetUrl(raw).orEmpty().ifBlank { raw }
         val normalized = normalizeImageUrl(baseUrl, src).orEmpty()
         if (normalized.isBlank()) return null
         if (normalized.contains("dccon_loading")) return null
-        return normalized
+        return CommentImage(url = normalized, isGif = rawGif.isNotBlank())
     }
+
+    private data class CommentImage(
+        val url: String,
+        val isGif: Boolean
+    )
 
     private fun readWriter(block: Element): String {
         return block.selectFirst(".nick, .nickname, .name, .writer")?.text()?.trim().orEmpty()
@@ -640,15 +706,30 @@ class DcRepository {
     }
 
     private fun listUrl(galleryId: String): String {
-        return "https://gall.dcinside.com/board/lists/?id=$galleryId"
+        return listUrl(galleryId, 1)
+    }
+
+    private fun listUrl(galleryId: String, page: Int): String {
+        val safePage = if (page < 1) 1 else page
+        return "https://gall.dcinside.com/board/lists/?id=$galleryId&page=$safePage"
     }
 
     private fun mobileListUrl(galleryId: String): String {
-        return "https://m.dcinside.com/board/$galleryId"
+        return mobileListUrl(galleryId, 1)
+    }
+
+    private fun mobileListUrl(galleryId: String, page: Int): String {
+        val safePage = if (page < 1) 1 else page
+        return "https://m.dcinside.com/board/$galleryId?page=$safePage"
     }
 
     private fun mobileConceptListUrl(galleryId: String): String {
-        return "https://m.dcinside.com/board/$galleryId?recommend=1"
+        return mobileConceptListUrl(galleryId, 1)
+    }
+
+    private fun mobileConceptListUrl(galleryId: String, page: Int): String {
+        val safePage = if (page < 1) 1 else page
+        return "https://m.dcinside.com/board/$galleryId?recommend=1&page=$safePage"
     }
 
     companion object {

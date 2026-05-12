@@ -35,6 +35,14 @@
             android:layout_weight="1"
             android:orientation="vertical" />
 
+        <ProgressBar
+            android:id="@+id/pagingLoading"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="8dp"
+            android:visibility="gone" />
+
         <TextView
             android:id="@+id/emptyPostsText"
             android:layout_width="match_parent"

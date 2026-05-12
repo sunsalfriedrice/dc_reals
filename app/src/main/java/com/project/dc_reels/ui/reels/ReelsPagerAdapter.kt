@@ -35,6 +35,17 @@ class ReelsPagerAdapter(
         notifyDataSetChanged()
     }
 
+    fun appendList(posts: List<DcPost>): Int {
+        if (posts.isEmpty()) return 0
+        val existing = items.map { it.url }.toHashSet()
+        val newItems = posts.filter { it.url.isNotBlank() && existing.add(it.url) }
+        if (newItems.isEmpty()) return 0
+        val start = items.size
+        items.addAll(newItems)
+        notifyItemRangeInserted(start, newItems.size)
+        return newItems.size
+    }
+
     fun updatePost(updated: DcPost) {
         val index = items.indexOfFirst { it.url == updated.url }
         if (index >= 0) {
