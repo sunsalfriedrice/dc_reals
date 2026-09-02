@@ -15,6 +15,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.appbar.MaterialToolbar
 import com.project.dc_reels.R
 import com.project.dc_reels.data.DcRepository
+import com.project.dc_reels.model.DcPostDetail
 import com.project.dc_reels.model.PostContentBlock
 import com.project.dc_reels.ui.comments.CommentsActivity
 import kotlinx.coroutines.Dispatchers
@@ -78,6 +79,17 @@ class PostContentActivity : AppCompatActivity() {
             startActivity(intent)
         }
 
+        val cachedDetail = repository.peekCachedPostDetail(url)
+        if (cachedDetail != null) {
+            bindDetail(
+                detail = cachedDetail,
+                initialTitle = initialTitle,
+                contentAdapter = contentAdapter,
+                postUrl = url
+            )
+            return
+        }
+
         lifecycleScope.launch {
             loading.visibility = View.VISIBLE
             val detail = withContext(Dispatchers.IO) {
@@ -86,37 +98,59 @@ class PostContentActivity : AppCompatActivity() {
             loading.visibility = View.GONE
 
             if (detail == null) {
-                contentAdapter.submitList(emptyList())
                 Toast.makeText(this@PostContentActivity, getString(R.string.post_load_failed), Toast.LENGTH_SHORT)
                     .show()
+                openOriginalPost(url, initialTitle)
+                finish()
                 return@launch
             }
 
-            if (detail.title.isNotBlank()) {
-                toolbar.title = detail.title
-            }
-
-            val blocks = if (detail.contentBlocks.isNotEmpty()) {
-                detail.contentBlocks
-            } else {
-                listOf(
-                    PostContentBlock(
-                        type = PostContentBlock.Type.TEXT,
-                        text = detail.bodyText.ifBlank { initialTitle }
-                    )
-                )
-            }
-            viewerItems = blocks.mapNotNull { block ->
-                when (block.type) {
-                    PostContentBlock.Type.IMAGE -> block.imageUrl?.takeIf { it.isNotBlank() }
-                        ?.let { ViewerMediaItem(ViewerMediaItem.Type.IMAGE, it) }
-                    PostContentBlock.Type.VIDEO -> block.videoUrl?.takeIf { it.isNotBlank() }
-                        ?.let { ViewerMediaItem(ViewerMediaItem.Type.VIDEO, it) }
-                    else -> null
-                }
-            }
-            contentAdapter.submitList(blocks)
+            bindDetail(
+                detail = detail,
+                initialTitle = initialTitle,
+                contentAdapter = contentAdapter,
+                postUrl = url
+            )
         }
+    }
+
+    private fun bindDetail(
+        detail: DcPostDetail,
+        initialTitle: String,
+        contentAdapter: PostContentAdapter,
+        postUrl: String
+    ) {
+        if (detail.title.isNotBlank()) {
+            toolbar.title = detail.title
+        }
+
+        val blocks = if (detail.contentBlocks.isNotEmpty()) {
+            detail.contentBlocks
+        } else {
+            listOf(
+                PostContentBlock(
+                    type = PostContentBlock.Type.TEXT,
+                    text = detail.bodyText.ifBlank { initialTitle }
+                )
+            )
+        }
+        if (blocks.isEmpty() || blocks.all { it.type == PostContentBlock.Type.TEXT && it.text.isBlank() }) {
+            Toast.makeText(this@PostContentActivity, getString(R.string.post_load_failed), Toast.LENGTH_SHORT)
+                .show()
+            openOriginalPost(postUrl, initialTitle)
+            finish()
+            return
+        }
+        viewerItems = blocks.mapNotNull { block ->
+            when (block.type) {
+                PostContentBlock.Type.IMAGE -> block.imageUrl?.takeIf { it.isNotBlank() }
+                    ?.let { ViewerMediaItem(ViewerMediaItem.Type.IMAGE, it) }
+                PostContentBlock.Type.VIDEO -> block.videoUrl?.takeIf { it.isNotBlank() }
+                    ?.let { ViewerMediaItem(ViewerMediaItem.Type.VIDEO, it) }
+                else -> null
+            }
+        }
+        contentAdapter.submitList(blocks)
     }
 
     private fun openImageViewer(mediaItems: List<ViewerMediaItem>, startIndex: Int, refererUrl: String) {
@@ -132,6 +166,14 @@ class PostContentActivity : AppCompatActivity() {
             )
             putExtra(ImageViewerActivity.EXTRA_REFERER_URL, refererUrl)
             putExtra(ImageViewerActivity.EXTRA_START_INDEX, startIndex)
+        }
+        startActivity(intent)
+    }
+
+    private fun openOriginalPost(url: String, title: String) {
+        val intent = Intent(this, PostDetailActivity::class.java).apply {
+            putExtra(PostDetailActivity.EXTRA_POST_URL, url)
+            putExtra(PostDetailActivity.EXTRA_POST_TITLE, title)
         }
         startActivity(intent)
     }

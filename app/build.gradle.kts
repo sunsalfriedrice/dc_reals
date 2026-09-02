@@ -47,6 +47,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.coil)
     implementation(libs.glide)
+    implementation(libs.photoview)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

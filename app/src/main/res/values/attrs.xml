@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- PhotoView custom attributes -->
+    <declare-styleable name="PhotoView">
+        <attr name="photoview_maximum_scale" format="float" />
+        <attr name="photoview_medium_scale" format="float" />
+        <attr name="photoview_zero_padding_edge_effect" format="boolean" />
+    </declare-styleable>
+</resources>
+

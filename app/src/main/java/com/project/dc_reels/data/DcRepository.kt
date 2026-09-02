@@ -13,10 +13,20 @@ import org.jsoup.nodes.TextNode
 import java.net.URLDecoder
 import java.net.URI
 import java.nio.charset.StandardCharsets
+import java.util.LinkedHashMap
 import kotlin.random.Random
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 
 class DcRepository {
-    fun resolveFinalUrl(rawUrl: String): String {
+    fun peekCachedPostDetail(postUrl: String): DcPostDetail? {
+        val key = cacheKey(postUrl)
+        synchronized(cacheLock) {
+            return postDetailCache[key]
+        }
+    }
+
+    suspend fun resolveFinalUrl(rawUrl: String): String {
         val normalized = normalizeUrl(rawUrl)
         if (!normalized.startsWith("http://") && !normalized.startsWith("https://")) {
             return normalized
@@ -32,7 +42,7 @@ class DcRepository {
             .toString()
     }
 
-    fun fetchGalleryName(galleryId: String): String {
+    suspend fun fetchGalleryName(galleryId: String): String {
         politeDelay()
         val doc = Jsoup.connect(listUrl(galleryId))
             .userAgent(USER_AGENT)
@@ -41,11 +51,11 @@ class DcRepository {
         return GalleryMetaParser.extractGalleryNameOrId(doc, galleryId)
     }
 
-    fun fetchConceptPosts(galleryId: String): List<DcPost> {
+    suspend fun fetchConceptPosts(galleryId: String): List<DcPost> {
         return fetchConceptPosts(galleryId, 1)
     }
 
-    fun fetchConceptPosts(galleryId: String, page: Int): List<DcPost> {
+    suspend fun fetchConceptPosts(galleryId: String, page: Int): List<DcPost> {
         // DC concept feed is most stable on mobile endpoint with recommend=1.
         politeDelay()
         val mobileDoc = Jsoup.connect(mobileConceptListUrl(galleryId, page))
@@ -54,7 +64,7 @@ class DcRepository {
             .get()
         val mobilePosts = parseMobilePosts(mobileDoc)
         if (mobilePosts.isNotEmpty()) {
-            return enrichPostsForReels(mobilePosts)
+            return mobilePosts
         }
 
         // Fallback to PC list only when mobile parsing fails.
@@ -65,7 +75,7 @@ class DcRepository {
             .get()
         val pcPosts = parsePcPosts(pcDoc).filter { it.recommend > 0 }
         if (pcPosts.isNotEmpty()) {
-            return enrichPostsForReels(pcPosts)
+            return pcPosts
         }
 
         throw IllegalStateException("no parsable posts from pc/mobile list")
@@ -149,23 +159,8 @@ class DcRepository {
         return digitsOnly.toIntOrNull() ?: 0
     }
 
-    private fun enrichPostsForReels(posts: List<DcPost>): List<DcPost> {
-        return posts.mapIndexed { index, post ->
-            // Limit expensive detail crawls; remaining cards still open full detail on tap.
-            if (index >= DETAIL_PREVIEW_LIMIT) return@mapIndexed post
 
-            runCatching {
-                val detail = fetchPostPreview(post.url)
-                post.copy(
-                    preview = detail.preview.ifBlank { post.title },
-                    imageUrl = detail.imageUrls.firstOrNull(),
-                    imageUrls = detail.imageUrls
-                )
-            }.getOrDefault(post)
-        }
-    }
-
-    fun fetchPostPreview(postUrl: String): PostPreview {
+    suspend fun fetchPostPreview(postUrl: String): PostPreview {
         val detail = fetchPostDetail(postUrl)
         val preview = detail.bodyText
             ?.replace(Regex("\\s+"), " ")
@@ -179,46 +174,74 @@ class DcRepository {
         )
     }
 
-    fun fetchPostDetail(postUrl: String): DcPostDetail {
+    suspend fun fetchPostDetail(postUrl: String): DcPostDetail {
         val mobileUrl = toMobilePostUrl(postUrl)
-        politeDelay()
-        val doc = Jsoup.connect(mobileUrl)
-            .userAgent(MOBILE_USER_AGENT)
-            .timeout(TIMEOUT_MS)
-            .ignoreHttpErrors(true)
-            .get()
-
-        val body = doc.selectFirst(".thum-txtin, .write_div, .writing_view_box")
-        val bodyClone = body?.clone()?.apply {
-            select(".spoiler, [class*=spoiler], [id*=spoiler], [class*=spoil], [id*=spoil]").remove()
-            select("img").filter { img -> isSpoilerImage(img) }.forEach { it.remove() }
+        val key = cacheKey(mobileUrl)
+        val request = CompletableDeferred<DcPostDetail>()
+        val selectedRequest = synchronized(cacheLock) {
+            postDetailCache[key]?.let { return it }
+            postDetailRequests[key] ?: run {
+                postDetailRequests[key] = request
+                request
+            }
         }
-        val bodyText = sanitizeSpoilerText(bodyClone?.text()?.trim().orEmpty())
+        if (selectedRequest !== request) {
+            return selectedRequest.await()
+        }
 
-        val imageUrls = extractImageUrls(bodyClone, doc, mobileUrl)
-        val contentBlocks = buildContentBlocks(bodyClone, mobileUrl)
-        val title = doc.selectFirst(".gallview-tit, .title-subject, .title_subject, .title")
-            ?.text()
-            ?.trim()
-            .orEmpty()
-            .let(::sanitizeSpoilerText)
-        val writer = doc.selectFirst(".ginfo li.list-nick, .gall_writer, .nickname")
-            ?.text()
-            ?.trim()
-            .orEmpty()
-        val dateText = doc.selectFirst(".ginfo li:nth-child(3), .gall_date, .date")
-            ?.text()
-            ?.trim()
-            .orEmpty()
+        politeDelay()
+        try {
+            val doc = Jsoup.connect(mobileUrl)
+                .userAgent(MOBILE_USER_AGENT)
+                .timeout(TIMEOUT_MS)
+                .ignoreHttpErrors(true)
+                .get()
 
-        return DcPostDetail(
-            title = title,
-            writer = writer,
-            dateText = dateText,
-            bodyText = bodyText,
-            imageUrls = imageUrls,
-            contentBlocks = contentBlocks
-        )
+            val body = doc.selectFirst(".thum-txtin, .write_div, .writing_view_box")
+            val bodyClone = body?.clone()?.apply {
+                select(".spoiler, [class*=spoiler], [id*=spoiler], [class*=spoil], [id*=spoil]").remove()
+                select("img").filter { img -> isSpoilerImage(img) }.forEach { it.remove() }
+            }
+            val bodyText = sanitizeSpoilerText(bodyClone?.text()?.trim().orEmpty())
+
+            val imageUrls = extractImageUrls(bodyClone, doc, mobileUrl)
+            val contentBlocks = buildContentBlocks(bodyClone, mobileUrl)
+            val title = doc.selectFirst(".gallview-tit, .title-subject, .title_subject, .title")
+                ?.text()
+                ?.trim()
+                .orEmpty()
+                .let(::sanitizeSpoilerText)
+            val writer = doc.selectFirst(".ginfo li.list-nick, .gall_writer, .nickname")
+                ?.text()
+                ?.trim()
+                .orEmpty()
+            val dateText = doc.selectFirst(".ginfo li:nth-child(3), .gall_date, .date")
+                ?.text()
+                ?.trim()
+                .orEmpty()
+
+            val detail = DcPostDetail(
+                title = title,
+                writer = writer,
+                dateText = dateText,
+                bodyText = bodyText,
+                imageUrls = imageUrls,
+                contentBlocks = contentBlocks
+            )
+
+            synchronized(cacheLock) {
+                postDetailCache[key] = detail
+                postDetailRequests.remove(key)
+            }
+            request.complete(detail)
+            return detail
+        } catch (t: Throwable) {
+            synchronized(cacheLock) {
+                postDetailRequests.remove(key)
+            }
+            request.completeExceptionally(t)
+            throw t
+        }
     }
 
     fun toMobilePostUrl(rawPostUrl: String): String {
@@ -568,7 +591,7 @@ class DcRepository {
         return text.replace(Regex("\\s+"), " ").trim()
     }
 
-    fun fetchAllComments(postUrl: String): List<DcComment> {
+    suspend fun fetchAllComments(postUrl: String): List<DcComment> {
         val mobileUrl = toMobilePostUrl(postUrl)
         politeDelay()
         val doc = Jsoup.connect(mobileUrl)
@@ -688,9 +711,9 @@ class DcRepository {
             .toMap()
     }
 
-    private fun politeDelay() {
+    private suspend fun politeDelay() {
         val delayMs = Random.nextLong(300L, 1401L)
-        Thread.sleep(delayMs)
+        delay(delayMs)
     }
 
     private fun normalizeUrl(raw: String): String {
@@ -703,6 +726,10 @@ class DcRepository {
         } else {
             trimmed
         }
+    }
+
+    private fun cacheKey(postUrl: String): String {
+        return toMobilePostUrl(postUrl)
     }
 
     private fun listUrl(galleryId: String): String {
@@ -734,8 +761,8 @@ class DcRepository {
 
     companion object {
         private const val TIMEOUT_MS = 10000
-        private const val DETAIL_PREVIEW_LIMIT = 4
         private const val PREVIEW_MAX_CHARS = 140
+        private const val MAX_CACHED_POSTS = 64
         private const val USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         private const val MOBILE_USER_AGENT =
@@ -743,6 +770,13 @@ class DcRepository {
         private val BLOCK_BREAK_TAGS = setOf(
             "p", "div", "li", "blockquote", "section", "article", "h1", "h2", "h3", "h4", "h5", "h6"
         )
+        private val cacheLock = Any()
+        private val postDetailCache = object : LinkedHashMap<String, DcPostDetail>(MAX_CACHED_POSTS, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, DcPostDetail>?): Boolean {
+                return size > MAX_CACHED_POSTS
+            }
+        }
+        private val postDetailRequests = mutableMapOf<String, CompletableDeferred<DcPostDetail>>()
     }
 
     data class PostPreview(

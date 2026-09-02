@@ -1,6 +1,7 @@
 package com.project.dc_reels.data
 
 import android.content.Context
+import androidx.core.content.edit
 import com.project.dc_reels.model.GalleryConfig
 import org.json.JSONArray
 import org.json.JSONObject
@@ -31,7 +32,7 @@ class GalleryStore(context: Context) {
                 put("name", it.displayName)
             })
         }
-        prefs.edit().putString(KEY_GALLERIES, arr.toString()).apply()
+        prefs.edit { putString(KEY_GALLERIES, arr.toString()) }
     }
 
     companion object {

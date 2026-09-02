@@ -8,9 +8,6 @@ import android.webkit.WebViewClient
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
-import com.bumptech.glide.Glide
-import com.bumptech.glide.load.model.GlideUrl
-import com.bumptech.glide.load.model.LazyHeaders
 import com.project.dc_reels.R
 import com.project.dc_reels.model.PostContentBlock
 
@@ -22,9 +19,15 @@ class PostContentAdapter(
     private val items = mutableListOf<PostContentBlock>()
 
     fun submitList(blocks: List<PostContentBlock>) {
+        val oldSize = items.size
         items.clear()
         items.addAll(blocks)
-        notifyDataSetChanged()
+        if (oldSize > 0) {
+            notifyItemRangeRemoved(0, oldSize)
+        }
+        if (items.isNotEmpty()) {
+            notifyItemRangeInserted(0, items.size)
+        }
     }
 
     override fun getItemViewType(position: Int): Int {
@@ -73,7 +76,7 @@ class PostContentAdapter(
 
     override fun getItemCount(): Int = items.size
 
-    private inner class TextViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+    private class TextViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val textView = itemView.findViewById<TextView>(R.id.contentText)
 
         fun bind(item: PostContentBlock) {
@@ -89,19 +92,13 @@ class PostContentAdapter(
             val isDccon = isDcconUrl(url)
             applyImageSize(imageView, isDccon)
 
-            val glideUrl = GlideUrl(
-                url,
-                LazyHeaders.Builder()
-                    .addHeader(HEADER_USER_AGENT, USER_AGENT)
-                    .addHeader(HEADER_REFERER, REFERER)
-                    .addHeader(HEADER_ACCEPT, ACCEPT_IMAGE)
-                    .build()
+            DcImageLoader.loadImage(
+                imageView = imageView,
+                imageUrl = url,
+                refererCandidates = DcImageLoader.refererCandidates(refererUrl),
+                placeholderRes = R.drawable.ic_launcher_foreground,
+                errorRes = R.drawable.ic_launcher_foreground
             )
-            Glide.with(imageView)
-                .load(glideUrl)
-                .placeholder(R.drawable.ic_launcher_foreground)
-                .error(R.drawable.ic_launcher_foreground)
-                .into(imageView)
 
             imageView.setOnClickListener {
                 if (url.isNotBlank()) onImageClick(url)
@@ -133,6 +130,7 @@ class PostContentAdapter(
     private inner class VideoViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val webView = itemView.findViewById<WebView>(R.id.contentVideoWebView)
 
+        @android.annotation.SuppressLint("SetJavaScriptEnabled")
         fun bind(item: PostContentBlock) {
             val url = item.videoUrl.orEmpty()
             if (url.isBlank()) return
@@ -152,9 +150,9 @@ class PostContentAdapter(
                 """.trimIndent()
                 webView.loadDataWithBaseURL(null, html, "text/html", "utf-8", null)
             } else {
-                val headers = mapOf(
+                val headers: Map<String, String> = mapOf(
                     HEADER_USER_AGENT to USER_AGENT,
-                    HEADER_REFERER to refererUrl
+                    HEADER_REFERER to (if (refererUrl.isNotBlank()) refererUrl else DEFAULT_REFERER)
                 )
                 webView.loadUrl(url, headers)
             }
@@ -173,10 +171,8 @@ class PostContentAdapter(
         private const val TYPE_VIDEO = 2
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36"
-        private const val REFERER = "https://m.dcinside.com/"
+        private const val DEFAULT_REFERER = "https://m.dcinside.com/"
         private const val HEADER_USER_AGENT = "User-Agent"
         private const val HEADER_REFERER = "Referer"
-        private const val HEADER_ACCEPT = "Accept"
-        private const val ACCEPT_IMAGE = "image/webp,image/*;q=0.8,*/*;q=0.5"
     }
 }

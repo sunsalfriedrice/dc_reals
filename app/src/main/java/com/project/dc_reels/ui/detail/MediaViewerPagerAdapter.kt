@@ -3,19 +3,25 @@ package com.project.dc_reels.ui.detail
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.annotation.SuppressLint
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.ImageView
 import androidx.recyclerview.widget.RecyclerView
-import com.bumptech.glide.Glide
-import com.bumptech.glide.load.model.GlideUrl
-import com.bumptech.glide.load.model.LazyHeaders
+import com.github.chrisbanes.photoview.PhotoView
 import com.project.dc_reels.R
 
 class MediaViewerPagerAdapter(
     private val items: List<ViewerMediaItem>,
     private val refererUrl: String
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+
+    // LRU 캐시: 현재 글의 이미지 갯수를 최대 크기로 설정 (Position 기반)
+    private val zoomStates = object : LinkedHashMap<Int, Float>(items.size + 1, 0.75f, true) {
+        override fun removeEldestEntry(eldest: Map.Entry<Int, Float>?): Boolean {
+            return size > items.size
+        }
+    }
 
     override fun getItemViewType(position: Int): Int {
         return when (items[position].type) {
@@ -42,7 +48,7 @@ class MediaViewerPagerAdapter(
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         val item = items[position]
         when (holder) {
-            is ImageViewHolder -> holder.bind(item.url)
+            is ImageViewHolder -> holder.bind(position, item.url)
             is VideoViewHolder -> holder.bind(item.url)
         }
     }
@@ -50,6 +56,8 @@ class MediaViewerPagerAdapter(
     override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
         if (holder is VideoViewHolder) {
             holder.recycle()
+        } else if (holder is ImageViewHolder) {
+            holder.saveZoomState()
         }
         super.onViewRecycled(holder)
     }
@@ -57,28 +65,49 @@ class MediaViewerPagerAdapter(
     override fun getItemCount(): Int = items.size
 
     private inner class ImageViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
-        private val imageView = itemView.findViewById<ImageView>(R.id.viewerImageView)
+        private val imageView = itemView.findViewById<PhotoView>(R.id.viewerImageView)
+        private var currentPosition: Int = -1
 
-        fun bind(url: String) {
-            val glideUrl = GlideUrl(
-                url,
-                LazyHeaders.Builder()
-                    .addHeader(HEADER_USER_AGENT, USER_AGENT)
-                    .addHeader(HEADER_REFERER, DEFAULT_REFERER)
-                    .addHeader(HEADER_ACCEPT, ACCEPT_IMAGE)
-                    .build()
+        fun bind(position: Int, url: String) {
+            currentPosition = position
+
+            // PhotoView 확대 설정 (최대 16배까지 확대 가능하도록 개선)
+            imageView.maximumScale = 16.0f
+            imageView.mediumScale = 5.0f
+            
+            // 먼저 줌 상태를 초기값으로 리셋
+            imageView.setScale(1.0f, false)
+            
+            // 저장된 줌 상태가 있으면 복원, 없으면 1.0f로 초기화
+            val savedZoom = zoomStates[position] ?: 1.0f
+
+            DcImageLoader.loadImage(
+                imageView = imageView,
+                imageUrl = url,
+                refererCandidates = DcImageLoader.refererCandidates(refererUrl),
+                placeholderRes = R.drawable.ic_launcher_foreground,
+                errorRes = R.drawable.ic_launcher_foreground,
+                isFullSize = true,
+                onImageLoaded = {
+                    // 이미지 로드 완료 후 저장된 줌 상태 복원
+                    if (savedZoom != 1.0f) {
+                        imageView.setScale(savedZoom, false)
+                    }
+                }
             )
-            Glide.with(imageView)
-                .load(glideUrl)
-                .placeholder(R.drawable.ic_launcher_foreground)
-                .error(R.drawable.ic_launcher_foreground)
-                .into(imageView)
+        }
+
+        fun saveZoomState() {
+            if (currentPosition != -1) {
+                zoomStates[currentPosition] = imageView.scale
+            }
         }
     }
 
     private inner class VideoViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val webView = itemView.findViewById<WebView>(R.id.viewerVideoWebView)
 
+        @SuppressLint("SetJavaScriptEnabled")
         fun bind(url: String) {
             if (url.isBlank()) return
             webView.settings.javaScriptEnabled = true
@@ -120,8 +149,6 @@ class MediaViewerPagerAdapter(
         private const val DEFAULT_REFERER = "https://m.dcinside.com/"
         private const val HEADER_USER_AGENT = "User-Agent"
         private const val HEADER_REFERER = "Referer"
-        private const val HEADER_ACCEPT = "Accept"
-        private const val ACCEPT_IMAGE = "image/webp,image/*;q=0.8,*/*;q=0.5"
     }
 }
 

@@ -16,6 +16,7 @@ class PostDetailActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private lateinit var loading: ProgressBar
+    private var initialPostUrl: String = ""
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,7 +39,20 @@ class PostDetailActivity : AppCompatActivity() {
         webView.webChromeClient = WebChromeClient()
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val targetUrl = request?.url?.toString().orEmpty()
+                if (request?.isForMainFrame == true) {
+                    if (!isSamePage(initialPostUrl, targetUrl) || isImageUrl(targetUrl)) {
+                        loading.visibility = View.GONE
+                        return true
+                    }
+                }
                 return false
+            }
+
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                if (isSamePage(initialPostUrl, url.orEmpty())) {
+                    loading.visibility = View.VISIBLE
+                }
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
@@ -53,6 +67,7 @@ class PostDetailActivity : AppCompatActivity() {
             return
         }
 
+        initialPostUrl = url
         loading.visibility = View.VISIBLE
         webView.loadUrl(url)
     }
@@ -67,5 +82,23 @@ class PostDetailActivity : AppCompatActivity() {
         const val EXTRA_POST_TITLE = "extra_post_title"
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36"
+    }
+
+    private fun isSamePage(baseUrl: String, targetUrl: String): Boolean {
+        if (baseUrl.isBlank() || targetUrl.isBlank()) return false
+        val base = baseUrl.substringBefore('#')
+        val target = targetUrl.substringBefore('#')
+        return base == target
+    }
+
+    private fun isImageUrl(rawUrl: String): Boolean {
+        val normalized = rawUrl.substringBefore('?').substringBefore('#').lowercase()
+        return normalized.endsWith(".jpg") ||
+            normalized.endsWith(".jpeg") ||
+            normalized.endsWith(".png") ||
+            normalized.endsWith(".gif") ||
+            normalized.endsWith(".webp") ||
+            normalized.endsWith(".bmp") ||
+            normalized.endsWith(".svg")
     }
 }
