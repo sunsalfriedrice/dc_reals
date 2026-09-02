@@ -74,16 +74,12 @@ object DcImageLoader {
             .placeholder(placeholderRes)
             .error(errorRes)
 
-        // 본문 이미지 vs 전체보기 이미지에 따라 다르게 처리
+        // ...existing code...
         val displayWidth = imageView.context.resources.displayMetrics.widthPixels
         if (isFullSize) {
-            // 전체 이미지 뷰어: 고해상도 유지
-            // 화면 너비의 2배까지 허용해서 확대에 대비
             builder.override(displayWidth * 2, Target.SIZE_ORIGINAL)
                 .downsample(DownsampleStrategy.AT_MOST)
         } else {
-            // 본문 이미지: 화면 너비에 맞추되 높이는 원본 비율 유지
-            // 극단적인 세로 비율의 이미지도 화질 열화 없이 표시
             builder.override(displayWidth, Target.SIZE_ORIGINAL)
                 .downsample(DownsampleStrategy.AT_MOST)
         }

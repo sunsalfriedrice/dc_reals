@@ -16,12 +16,10 @@ class MediaViewerPagerAdapter(
     private val refererUrl: String
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
-    // LRU 캐시: 현재 글의 이미지 갯수를 최대 크기로 설정 (Position 기반)
-    private val zoomStates = object : LinkedHashMap<Int, Float>(items.size + 1, 0.75f, true) {
-        override fun removeEldestEntry(eldest: Map.Entry<Int, Float>?): Boolean {
-            return size > items.size
-        }
-    }
+    // 이미지 URL별 줌 상태 저장소
+    private val zoomStates = mutableMapOf<String, Float>()
+
+
 
     override fun getItemViewType(position: Int): Int {
         return when (items[position].type) {
@@ -48,7 +46,7 @@ class MediaViewerPagerAdapter(
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         val item = items[position]
         when (holder) {
-            is ImageViewHolder -> holder.bind(position, item.url)
+            is ImageViewHolder -> holder.bind(item.url)
             is VideoViewHolder -> holder.bind(item.url)
         }
     }
@@ -56,8 +54,6 @@ class MediaViewerPagerAdapter(
     override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
         if (holder is VideoViewHolder) {
             holder.recycle()
-        } else if (holder is ImageViewHolder) {
-            holder.saveZoomState()
         }
         super.onViewRecycled(holder)
     }
@@ -66,20 +62,24 @@ class MediaViewerPagerAdapter(
 
     private inner class ImageViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val imageView = itemView.findViewById<PhotoView>(R.id.viewerImageView)
-        private var currentPosition: Int = -1
+        private var currentUrl: String = ""
 
-        fun bind(position: Int, url: String) {
-            currentPosition = position
-
-            // PhotoView 확대 설정 (최대 16배까지 확대 가능하도록 개선)
+        fun bind(url: String) {
+            currentUrl = url
+            
+            // 16배까지 확대 가능하도록 설정
             imageView.maximumScale = 16.0f
             imageView.mediumScale = 5.0f
             
-            // 먼저 줌 상태를 초기값으로 리셋
-            imageView.setScale(1.0f, false)
+            // 사용자가 이미지를 조작할 때마다 줌 상태 저장
+            imageView.setOnMatrixChangeListener {
+                if (currentUrl.isNotBlank()) {
+                    zoomStates[currentUrl] = imageView.scale
+                }
+            }
             
             // 저장된 줌 상태가 있으면 복원, 없으면 1.0f로 초기화
-            val savedZoom = zoomStates[position] ?: 1.0f
+            val savedZoom = zoomStates[url] ?: 1.0f
 
             DcImageLoader.loadImage(
                 imageView = imageView,
@@ -90,17 +90,11 @@ class MediaViewerPagerAdapter(
                 isFullSize = true,
                 onImageLoaded = {
                     // 이미지 로드 완료 후 저장된 줌 상태 복원
-                    if (savedZoom != 1.0f) {
+                    if (savedZoom > 1.0f) {
                         imageView.setScale(savedZoom, false)
                     }
                 }
             )
-        }
-
-        fun saveZoomState() {
-            if (currentPosition != -1) {
-                zoomStates[currentPosition] = imageView.scale
-            }
         }
     }
 

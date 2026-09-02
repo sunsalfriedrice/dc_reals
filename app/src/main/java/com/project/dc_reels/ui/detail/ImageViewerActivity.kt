@@ -50,6 +50,7 @@ class ImageViewerActivity : AppCompatActivity() {
             items = mediaItems,
             refererUrl = refererUrl
         )
+        pager.offscreenPageLimit = 3  // 현재 페이지 ±3까지 메모리에 유지 (최대 7개 이미지)
         pager.setCurrentItem(startIndex.coerceAtMost(mediaItems.lastIndex), false)
         updateIndex(pager.currentItem, mediaItems.size)
 
